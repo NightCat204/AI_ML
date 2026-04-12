@@ -1,3 +1,20 @@
-项目/home/user/Personal/Project/predict_A是一套基于深度学习模型预测股票走势的项目，是一份在线任务的本地克隆。首先充分阅读并理解项目中的已有文档与程序框架，总结任务核心目标、实现思路与注意事项，以及目前缺失的其他信息，后续我将予以补全并协助完成项目开发。
+项目/home/user/Personal/AI_ML/predict_A是一套基于深度学习模型预测股票走势的项目，是一份云端学习任务的本地克隆。首先充分阅读并理解项目中的已有文档与程序框架，总结任务核心目标、实现思路与注意事项，以及目前缺失的其他信息，后续我将予以补全并协助完成项目开发。最后总结核心分析，在predict_A目录下生成一份README.md文件，详细描述项目的背景、目标、实现方法、前置准备与使用说明，便于跨系统跨设备移植。
 
-基于此进行开发和补充，确保项目能够成功运行并尽可能提高性能。
+1. 对于云端环境信息，相关信息通过云端终端查询如下，如果还需要补充信息，可以直接给我对应的查询指令，我会负责执行并反馈结果，注意本地运行项目时，你应该主动创建所需的conda环境，命名与项目名一致：
+
+   ```
+   jovyan@notebook:~/work$ python -V Python 3.7.5
+   
+   jovyan@notebook:~/work$ pip list Package                       Version ----------------------------- ------------ absl-py                       0.9.0 alembic                       1.12.1 argon2-cffi                   23.1.0 argon2-cffi-bindings          21.2.0 ase                           3.21.1 astor                         0.8.1 asttokens                     2.4.1 astunparse                    1.6.3 async-generator               1.10 attrs                         19.3.0 Augmentor                     0.2.8 backcall                      0.2.0 baytune                       0.4.0 bleach                        5.0.0 blis                          0.4.1 boto3                         1.16.25 botocore                      1.19.25 cachetools                    3.1.1 cairocffi                     1.3.0 CairoSVG                      2.5.2 calysto                       1.0.6 catalogue                     1.0.0 certifi                       2022.9.24 certipy                       0.1.3 cffi                          1.15.0 charset-normalizer            2.1.1 click                         8.1.2 cloudpickle                   1.2.2 cmake                         3.21.1 configparser                  5.2.0 copulas                       0.3.3 cryptography                  36.0.2 cssselect2                    0.5.0 cycler                        0.11.0 cymem                         2.0.6 Cython                        0.29.20 debugpy                       1.6.0 decorator                     4.4.2 defusedxml                    0.7.1 distlib                       0.3.4 dlib                          19.22.0 dm-tree                       0.1.7 easydict                      1.9 en-core-web-sm                2.3.0 entrypoints                   0.4 et-xmlfile                    1.1.0 fastjsonschema                2.15.3 filelock                      3.6.0 func-timeout                  4.3.5 future                        0.18.2 gast                          0.3.3 gensim                        3.8.3 google-auth                   2.14.0 google-auth-oauthlib          0.4.6 google-pasta                  0.2.0 googledrivedownloader         0.4 graphviz                      0.14 greenlet                      1.1.2 grpcio                        1.29.0 gym                           0.15.7 h5py                          2.10.0 idna                          3.4 imageio                       2.8.0 imageio-ffmpeg                0.5.1 imbalanced-learn              0.6.2 imgaug                        0.4.0 importlib-metadata            4.13.0 importlib-resources           5.7.0 ipdb                          0.13.2 ipykernel                     6.13.0 ipython                       7.32.0 ipython-genutils              0.2.0 ipywidgets                    7.4.0 isodate                       0.6.1 jdcal                         1.4.1 jedi                          0.18.1 jieba                         0.42.1 Jinja2                        3.0.3 jmespath                      0.10.0 joblib                        1.1.0 jsonschema                    4.4.0 jupyter-client                7.2.2 jupyter-core                  4.9.2 jupyter-telemetry             0.1.0 jupyterhub                    1.4.2 jupyterlab                    1.0.0a1 jupyterlab-server             0.2.0 kanren                        0.2.3 Keras                         2.4.3 Keras-Preprocessing           1.1.2 kiwisolver                    1.3.2 llvmlite                      0.39.1 Mako                          1.2.0 Markdown                      3.4.1 MarkupSafe                    2.1.1 matplotlib                    3.0.3 matplotlib-inline             0.1.3
+   ```
+
+2. 本地存在4090与对应的cuda，可以补充安装对应的工具或驱动，但应注意作业明确提醒云端不存在gpu资源，所以最终项目在验收时必须仅依赖cpu，避免平台兼容问题；另外本任务可能需要跨设备迁移，性能可接受前提下尽可能基于cpu直接进行计算，尽可能保证迁移的兼容性
+
+3. 评分标准已截图上传，应尽可能提高分数指标
+
+4. 模型架构无硬性要求，但非必要尽可能间接直接，同时需要兼顾考虑训练与部署的算力与时间成本。
+
+5. 本地文件已包含作业提供的所有文件信息，仅使用现有数据进行训练即可
+
+
+
