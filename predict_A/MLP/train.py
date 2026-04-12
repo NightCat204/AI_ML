@@ -10,30 +10,28 @@ import os
 import math
 
 # ===================== 配置 =====================
-WINDOW_SIZE = 14
 BATCH_SIZE = 256
-HIDDEN_SIZE = 128
-NUM_LAYERS = 2
 LR = 1e-3
 WEIGHT_DECAY = 1e-4
-EPOCHS = 300
-PATIENCE = 40
+EPOCHS = 500
+PATIENCE = 50
 MODEL_PATH = 'results/mymodel.pt'
 
 
 # ===================== 模型 =====================
-class GRUNet(nn.Module):
-    def __init__(self, input_size=1, hidden_size=128, num_layers=2, output_size=1):
-        super(GRUNet, self).__init__()
-        self.gru = nn.GRU(input_size=input_size, hidden_size=hidden_size,
-                          num_layers=num_layers, batch_first=True, dropout=0.1)
-        self.fc = nn.Linear(hidden_size, output_size)
+class MLPNet(nn.Module):
+    def __init__(self, input_size=14, hidden_size=64, output_size=1):
+        super(MLPNet, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, output_size),
+        )
 
     def forward(self, x):
-        if x.dim() == 2:
-            x = x.unsqueeze(2)
-        out, _ = self.gru(x)
-        return self.fc(out[:, -1, :])
+        return self.net(x)
 
 
 # ===================== 数据 =====================
@@ -130,7 +128,7 @@ def train():
         torch.utils.data.TensorDataset(x_tr, y_tr),
         batch_size=BATCH_SIZE, shuffle=True)
 
-    model = GRUNet(1, HIDDEN_SIZE, NUM_LAYERS, 1)
+    model = MLPNet()
     loss_fn = nn.MSELoss()
     opt = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, factor=0.5, patience=15)

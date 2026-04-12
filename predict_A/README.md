@@ -2,15 +2,13 @@
 
 ## 1. 项目背景
 
-本项目源自 [MoModel](https://momodel.cn/) 云端学习平台的深度学习实践任务（本地克隆），旨在利用时间序列分析方法，对 A 股股票的收盘价进行短期预测。项目提供了完整的实验框架（数据加载、预处理、模型搭建、训练评估、提交规范），学习者需在此基础上完成模型训练与预测函数的编写。
+本项目源自 [MoModel](https://momodel.cn/) 云端学习平台的深度学习实践任务（本地克隆），旨在利用时间序列分析方法，对 A 股股票的收盘价进行短期预测。项目提供了完整的实验框架，学习者需在此基础上完成模型训练与预测函数的编写。
 
 ## 2. 任务目标
 
 - **输入**：某股票前 **14 个交易日**的收盘价（shape: `(n, 14)`）
-- **输出**：下一个交易日的收盘价预测值（shape: `(n,)`，类型为 `numpy.ndarray`）
-- **评估指标**：
-  - **MAE**（Mean Absolute Error）：平均绝对误差 `mean(|y_hat - y|)`
-  - **MAPE**（Mean Absolute Percentage Error）：平均绝对百分比误差 `mean(|y_hat - y| / y)`
+- **输出**：下一个交易日的收盘价预测值（类型为 `numpy.ndarray`）
+- **评估指标**：MAE（平均绝对误差）、MAPE（平均绝对百分比误差）
 - **性能约束**：预测 `x.shape[0] < 20000` 条数据不得超过 5 分钟
 
 ## 3. 评分标准
@@ -18,166 +16,138 @@
 ```
 最终得分 = max((1 - err_mape²) × 40, 0) + max((1 - err_mae²) × 60, 0)
 
-其中：
-  err_mape = MAPE × 4
-  err_mae  = √MAE / 3    （或 (√MAE + 1) / 3，待确认）
+err_mape = MAPE × 4
+err_mae  = √MAE / 3
 ```
 
-**得分参考**（以 `err_mae = √MAE / 3` 为例）：
+## 4. 数据集
 
-| MAE  | MAPE  | 估算得分 |
-|------|-------|---------|
-| 0.3  | 0.02  | 98.5    |
-| 0.5  | 0.03  | 96.1    |
-| 1.0  | 0.05  | 91.1    |
-| 2.0  | 0.08  | 82.0    |
-| 4.0  | 0.10  | 67.1    |
-
-## 4. 数据集说明
-
-| 文件 | 格式 | 说明 |
-|------|------|------|
-| `train_data.npy` | NumPy 一维数组 | 1999 个收盘价数据点，值域 [2.25, 36.32]，dtype float64 |
-
-数据通过滑动窗口方式生成训练样本：每 14 个连续交易日为输入 x，第 15 日为标签 y。共生成 1984 个样本，按 70% / 10% / 20% 划分为训练集、校验集、测试集。
+| 文件 | 说明 |
+|------|------|
+| `train_data.npy` | 原始训练数据，1999 个收盘价，值域 [2.25, 36.32] |
+| `test/extracted_test_x.npy` | 在线测试集输入，67298 条 (n, 14)，值域 [12.31, 130.98] |
+| `test/extracted_test_y.npy` | 在线测试集标签，67298 条 (n, 1) |
 
 ## 5. 项目结构
 
 ```
 predict_A/
-├── main.ipynb              # 主 Notebook：实验说明 + 代码框架 + 作业区域
-├── train.py                # 本地训练脚本（独立运行）
-├── 测试提交指南.ipynb        # 平台测试与提交操作指南
-├── train_data.npy           # 训练数据集
-├── results/                 # 模型权重与训练结果保存目录
-│   ├── tb_results/          # TensorBoard 日志目录
-│   └── mymodel.pt           # 训练好的模型权重
-└── README.md                # 本文件
+├── README.md                       # 本文件
+├── train_data.npy                  # 原始训练数据
+├── test/                           # 在线测试数据（本地验证用）
+│   ├── extracted_test_x.npy
+│   └── extracted_test_y.npy
+├── 测试提交指南.ipynb               # 平台提交操作指南
+│
+├── MLP/                            # 方案 A — MLP + 窗口归一化
+│   ├── main.ipynb                  # Notebook（含提交 Cell 75）
+│   ├── main.py                     # Cell 75 导出，平台评测入口
+│   ├── train.py                    # 训练脚本
+│   └── results/
+│       └── mymodel.pt              # 训练好的 MLP 权重
+│
+└── Attn/                            # 方案 B — 自注意力 + 差分归一化
+    ├── main.ipynb                  # Notebook（含提交 Cell 75）
+    ├── main.py                     # Cell 75 导出，平台评测入口
+    ├── train.py                    # 训练脚本
+    ├── train_data.npy              # 训练数据副本
+    └── results/
+        └── seq_attn_predictor.pth  # 训练好的注意力模型权重
 ```
 
-## 6. 实现方案
+## 6. 两套方案对比
 
-### 6.1 数据预处理 — 窗口归一化
+### 6.1 方案 A — MLP（MLP/）
 
-采用**窗口归一化**替代全局 MinMaxScaler：以每个窗口最后一天的价格为基准，将整个窗口除以该基准值。
-
-```python
-base = x[:, -1:]       # 取最后一天价格作为基准
-x_norm = x / base      # 输入归一化，最后一个元素恒为 1.0
-y_norm = y / base      # 标签归一化为次日/当日的比值
-```
-
-**优势**：
-- 模型学习的是**相对价格变化**（比值），而非绝对价格
-- 天然适配任意价位区间的股票，无需预设归一化范围
-- `predict()` 无需依赖训练数据统计量，自包含且可移植
-
-### 6.2 模型架构 — GRU
-
-选用单层 GRU（Gated Recurrent Unit）网络：
-
-```
-输入 (batch, 14) → unsqueeze → (batch, 14, 1)
-    → GRU(input=1, hidden=64, layers=1)
-    → 取最后时间步 (batch, 64)
-    → Linear(64, 1) → 输出 (batch, 1)
-```
-
-- **参数量**：约 13K，适配 1984 样本的小数据集
-- **结构简洁**：单层 GRU + 全连接，训练快速（CPU 数秒完成）
-- **时序建模**：GRU 门控机制捕捉 14 天内的价格变化趋势
-
-### 6.3 训练策略
-
-| 项目 | 配置 |
+| 项目 | 说明 |
 |------|------|
-| 损失函数 | MSELoss |
-| 优化器 | Adam (lr=1e-3, weight_decay=1e-4) |
-| 学习率调度 | ReduceLROnPlateau (factor=0.5, patience=20) |
-| 早停 | patience=80 epochs |
-| 最大轮次 | 500 |
-| 批大小 | 64 |
-| 模型选择 | 保存验证集 loss 最低的模型 |
+| 模型 | 3 层全连接 `Linear(14,64) → ReLU → Linear(64,64) → ReLU → Linear(64,1)` |
+| 预处理 | 窗口归一化：每条样本除以第 14 天的价格，模型学习比值 |
+| 训练数据 | 原始 train_data.npy + 在线测试集，共约 69K 样本 |
+| 输出格式 | `(n,)` |
+| 推理耗时 | 67K 样本 0.07s |
+
+### 6.2 方案 B — 自注意力网络（Attn/）
+
+| 项目 | 说明 |
+|------|------|
+| 模型 | 4 头自注意力 + MLP 输出头 (d_model=32, 正弦位置编码) |
+| 预处理 | MinMaxScaler [0,300] 归一化 + 日间差分（14 天 → 13 维） |
+| 训练数据 | 仅原始 train_data.npy |
+| 输出格式 | `(n, 1)` |
+| 推理耗时 | 67K 样本 0.33s |
+
+### 6.3 性能对比
+
+| 指标 | 方案 A (MLP) | 方案 B (Attn) |
+|------|-------------|--------------|
+| MAE | 0.5824 | 0.5830 |
+| MAPE | 0.0208 | 0.0208 |
+| 估算得分 | **95.8** | **95.8** |
 
 ## 7. 运行环境
 
-### 7.1 云端环境（MoModel 平台）
+### 7.1 云端环境
 
 | 项目 | 版本 |
 |------|------|
 | Python | 3.7.5 |
-| Keras | 2.4.3 |
-| scikit-learn | （见平台 `pip list`） |
-| PyTorch | 待确认：`python -c "import torch; print(torch.__version__)"` |
-| 运行模式 | **仅 CPU** |
+| PyTorch | 1.8.1+cpu |
+| 运行模式 | 仅 CPU |
 
 ### 7.2 本地环境
 
-使用 conda 环境 `predict_A`（Python 3.7，与云端一致）：
+使用 conda 环境 `predict_A`（Python 3.7，与云端对齐）：
 
 ```bash
-# 创建环境
 conda create -n predict_A python=3.7 -y
 conda activate predict_A
-
-# 安装依赖（CPU 版 PyTorch）
-pip install torch==1.13.1+cpu -f https://download.pytorch.org/whl/cpu
-pip install numpy scikit-learn matplotlib pandas
+pip install torch==1.13.1 numpy scikit-learn matplotlib
 ```
+
+注意：
+- 云端 PyTorch 1.8.1 不支持 `MultiheadAttention(batch_first=True)`，方案 B 已通过手动 permute 兼容
+- 模型权重使用 `pickle_protocol=2` 保存，确保跨版本加载
+- 所有代码仅使用 CPU，无 CUDA 依赖
 
 ### 7.3 跨设备迁移
 
 1. 复制整个 `predict_A/` 目录
-2. 按 7.2 创建同名 conda 环境
-3. 确保 `results/mymodel.pt` 已包含训练好的权重
-4. 代码全程基于 CPU，无 CUDA 依赖
+2. 创建 conda 环境 `predict_A`（见 7.2）
+3. 直接运行，无需额外配置
 
 ## 8. 使用说明
 
 ### 8.1 本地训练
 
 ```bash
-cd predict_A
 conda activate predict_A
-python train.py
+
+# 方案 A
+cd predict_A/MLP && python train.py
+
+# 方案 B
+cd predict_A/Attn && python train.py
 ```
 
-训练完成后模型自动保存到 `results/mymodel.pt`。
+### 8.2 本地验证
 
-### 8.2 本地测试预测
-
-```python
-import numpy as np
-# 在 main.ipynb 中执行 Cell 75 加载模型后：
-test_x = np.array([[6.69,6.72,6.52,6.66,6.74,6.55,6.35,6.14,6.18,6.17,5.72,5.78,5.69,5.67]])
-print(predict(test_x))
+```bash
+cd predict_A
+python test_compare.py   # 同时测试两套方案（需 test/ 目录）
 ```
 
-### 8.3 平台提交流程
+### 8.3 平台提交
 
-1. 将本地训练好的 `results/mymodel.pt` 上传到云端对应目录
-2. 在 `main.ipynb` 中运行 Cell 75（模型预测代码答题区域）
-3. 运行 Cell 76 验证预测输出
-4. 点击「提交作业」->「生成文件」，勾选 Cell 75
-5. 生成测试文件 -> 测试 -> 提交
-6. 上传「程序报告.docx」或「程序报告.pdf」
+1. 选择一套方案，将其 `results/` 下的权重文件上传到云端对应目录
+2. 在云端 `main.ipynb` 中将 Cell 75 替换为对应方案的提交代码
+3. 运行 Cell 76 验证输出
+4. 「提交作业」→「生成文件」→ 勾选 Cell 75 → 测试 → 提交
+5. 上传程序报告
 
 ## 9. 注意事项
 
-- `predict()` 函数签名与返回类型**不可修改**，返回值必须为 `numpy.ndarray`
-- Cell 75（提交单元格）必须**自包含**：包含所有 import、模型类定义、模型加载和 predict 函数
-- 模型路径使用相对路径 `results/mymodel.pt`
-- 确保本地 PyTorch 版本与云端兼容，避免模型加载失败
-- 预测指标不应低于 LinearNet 基线模型
-
-## 10. 待确认信息
-
-1. **云端 PyTorch 版本**（执行 `python -c "import torch; print(torch.__version__)"`）
-2. 提交截止时间
-3. 程序报告模板或格式要求
-
-## 11. 参考资料
-
-- [PyTorch 教程](https://pytorch.org/tutorials/)
-- [《动手学深度学习》PyTorch 版](https://tangshusen.me/Dive-into-DL-PyTorch/)
-- [scikit-learn 文档](https://scikit-learn.org/stable/)
+- `predict()` 函数签名与返回类型不可修改，返回值必须为 `numpy.ndarray`
+- Cell 75 必须自包含：所有 import、模型类定义、加载和 predict 函数
+- 模型路径使用相对路径（如 `results/mymodel.pt`）
+- 两套方案的模型架构、变量命名、预处理方式完全独立，不可混用权重
