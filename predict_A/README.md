@@ -1,153 +1,197 @@
 # A 股收盘价预测
 
-## 1. 项目背景
+## 1. 项目概述
 
-本项目源自 [MoModel](https://momodel.cn/) 云端学习平台的深度学习实践任务（本地克隆），旨在利用时间序列分析方法，对 A 股股票的收盘价进行短期预测。项目提供了完整的实验框架，学习者需在此基础上完成模型训练与预测函数的编写。
+本项目是基于 MoModel A 股收盘价预测任务整理出的本地工程，当前仓库中同时保留了两套实现方案：
 
-## 2. 任务目标
+- `MLP/`：窗口归一化 + 多层感知机
+- `Attn/`：固定尺度归一化 + 差分序列 + 轻量自注意力
 
-- **输入**：某股票前 **14 个交易日**的收盘价（shape: `(n, 14)`）
-- **输出**：下一个交易日的收盘价预测值（类型为 `numpy.ndarray`）
-- **评估指标**：MAE（平均绝对误差）、MAPE（平均绝对百分比误差）
-- **性能约束**：预测 `x.shape[0] < 20000` 条数据不得超过 5 分钟
+除模型代码外，仓库还包含本地测试数据、平台提交用 notebook、报告源码与 PDF，以及一个单独归档到 `Docs/` 的外部参考材料文件。
 
-## 3. 评分标准
+## 2. 任务定义
 
+- 输入：某股票前 14 个交易日的收盘价，形状为 `(n, 14)`
+- 输出：第 15 个交易日的预测收盘价，返回类型必须为 `numpy.ndarray`
+- 评估指标：MAE、MAPE
+- 评测约束：当 `x.shape[0] < 20000` 时，单次预测耗时不得超过 5 分钟
+
+评分公式如下：
+
+```text
+Score = max((1 - err_mape^2) * 40, 0) + max((1 - err_mae^2) * 60, 0)
+
+err_mape = 4 * MAPE
+err_mae  = sqrt(MAE) / 3
 ```
-最终得分 = max((1 - err_mape²) × 40, 0) + max((1 - err_mae²) × 60, 0)
 
-err_mape = MAPE × 4
-err_mae  = √MAE / 3
-```
+## 3. 当前数据文件
 
-## 4. 数据集
+下表反映的是当前仓库中实际存在的数据文件，而不是平台抽象描述：
 
-| 文件 | 说明 |
-|------|------|
-| `train_data.npy` | 原始训练数据，1999 个收盘价，值域 [2.25, 36.32] |
-| `test/extracted_test_x.npy` | 在线测试集输入，67298 条 (n, 14)，值域 [12.31, 130.98] |
-| `test/extracted_test_y.npy` | 在线测试集标签，67298 条 (n, 1) |
+| 文件                          | 当前状态                                                          |
+| ----------------------------- | ----------------------------------------------------------------- |
+| `train_data.npy`            | 形状 `(1999,)`，`float64`，价格范围 `[2.25, 36.32]`         |
+| `test/extracted_test_x.npy` | 形状 `(67298, 14)`，`float32`，价格范围约 `[12.31, 130.98]` |
+| `test/extracted_test_y.npy` | 形状 `(67298, 1)`，`float32`，价格范围约 `[12.31, 130.98]`  |
 
-## 5. 项目结构
+## 4. 当前目录结构
 
-```
+以下结构基于当前仓库内容整理，省略了 `__pycache__`、`.DS_Store` 和部分 LaTeX 编译辅助文件：
+
+```text
 predict_A/
-├── README.md                       # 本文件
-├── train_data.npy                  # 原始训练数据
-├── test/                           # 在线测试数据（本地验证用）
+├── README.md
+├── train_data.npy
+├── test/
 │   ├── extracted_test_x.npy
 │   └── extracted_test_y.npy
-├── 测试提交指南.ipynb               # 平台提交操作指南
-│
-├── MLP/                            # 方案 A — MLP + 窗口归一化
-│   ├── main.ipynb                  # Notebook（含提交 Cell 75）
-│   ├── main.py                     # Cell 75 导出，平台评测入口
-│   ├── train.py                    # 训练脚本
+├── 测试提交指南.ipynb
+├── Docs/
+│   └── xjg报告.pdf
+├── MLP/
+│   ├── main.ipynb
+│   ├── main.py
+│   ├── train.py
 │   └── results/
-│       └── mymodel.pt              # 训练好的 MLP 权重
-│
-└── Attn/                            # 方案 B — 自注意力 + 差分归一化
-    ├── main.ipynb                  # Notebook（含提交 Cell 75）
-    ├── main.py                     # Cell 75 导出，平台评测入口
-    ├── train.py                    # 训练脚本
-    ├── train_data.npy              # 训练数据副本
-    └── results/
-        └── seq_attn_predictor.pth  # 训练好的注意力模型权重
+│       ├── mymodel.pt
+│       ├── README.md
+│       └── tb_results/
+│           └── README.md
+├── Attn/
+│   ├── main.ipynb
+│   ├── main.py
+│   ├── train.py
+│   └── results/
+│       ├── seq_attn_predictor.pth
+│       ├── README.md
+│       └── tb_results/
+│           └── README.md
+└── Report/
+    ├── thesis.tex
+    ├── thesis.pdf
+    ├── bibfile.bib
+    ├── gbt7714-2005.bst
+    ├── body/
+    └── figure/
 ```
 
-## 6. 两套方案对比
+其中：
 
-### 6.1 方案 A — MLP（MLP/）
+- `Docs/xjg报告.pdf` 是单独归档的外部参考材料，不属于运行依赖。
+- `Report/` 是当前课程报告工程，包含 LaTeX 源码、图片和已生成的 PDF。
+- 两个 `results/` 目录下都已经有现成权重文件，不需要重新训练才能查看提交入口代码。
 
-| 项目 | 说明 |
-|------|------|
-| 模型 | 3 层全连接 `Linear(14,64) → ReLU → Linear(64,64) → ReLU → Linear(64,1)` |
-| 预处理 | 窗口归一化：每条样本除以第 14 天的价格，模型学习比值 |
-| 训练数据 | 原始 train_data.npy + 在线测试集，共约 69K 样本 |
-| 输出格式 | `(n,)` |
-| 推理耗时 | 67K 样本 0.07s |
+## 5. 两套方案的当前实现
 
-### 6.2 方案 B — 自注意力网络（Attn/）
+### 5.1 方案 A：`MLP/`
 
-| 项目 | 说明 |
-|------|------|
-| 模型 | 4 头自注意力 + MLP 输出头 (d_model=32, 正弦位置编码) |
-| 预处理 | MinMaxScaler [0,300] 归一化 + 日间差分（14 天 → 13 维） |
-| 训练数据 | 仅原始 train_data.npy |
-| 输出格式 | `(n, 1)` |
-| 推理耗时 | 67K 样本 0.33s |
+当前文件职责如下：
 
-### 6.3 性能对比
+- `MLP/main.py`
+  - 平台提交入口
+  - 定义 `MLPNet`
+  - 通过相对路径 `results/mymodel.pt` 加载权重
+  - `predict(test_x)` 返回形状 `(n,)`
+- `MLP/train.py`
+  - 训练脚本源码
+  - `load_all_data()` 会优先读取当前工作目录下的 `train_data.npy`
+  - 如果当前工作目录下存在 `test/extracted_test_x.npy` 和 `test/extracted_test_y.npy`，会一并并入训练
+  - 训练策略为窗口归一化 + MSE + Adam + `ReduceLROnPlateau` + 早停
 
-| 指标 | 方案 A (MLP) | 方案 B (Attn) |
-|------|-------------|--------------|
-| MAE | 0.5824 | 0.5830 |
-| MAPE | 0.0208 | 0.0208 |
-| 估算得分 | **95.8** | **95.8** |
+模型结构为：
 
-## 7. 运行环境
+```text
+Linear(14, 64) -> ReLU -> Linear(64, 64) -> ReLU -> Linear(64, 1)
+```
 
-### 7.1 云端环境
+### 5.2 方案 B：`Attn/`
 
-| 项目 | 版本 |
-|------|------|
-| Python | 3.7.5 |
-| PyTorch | 1.8.1+cpu |
-| 运行模式 | 仅 CPU |
+当前文件职责如下：
 
-### 7.2 本地环境
+- `Attn/main.py`
+  - 平台提交入口
+  - 定义 `SeqAttnPredictor`
+  - 通过相对路径 `./results/seq_attn_predictor.pth` 加载权重
+  - `predict(test_x)` 返回形状 `(n, 1)`
+- `Attn/train.py`
+  - 训练脚本源码
+  - 从当前工作目录读取 `train_data.npy`
+  - 用固定区间 `[0, 300]` 做 `MinMaxScaler`
+  - 将长度 14 的价格窗口转换为长度 13 的差分输入
+  - 使用 4 头自注意力与位置编码预测下一步增量
 
-使用 conda 环境 `predict_A`（Python 3.7，与云端对齐）：
+该方案当前只使用 `train_data.npy` 构造训练、验证和测试划分，不会读取 `test/` 下的数据。
+
+## 6. 当前保存的权重与结果
+
+当前仓库中已经存在以下权重文件：
+
+- `MLP/results/mymodel.pt`
+- `Attn/results/seq_attn_predictor.pth`
+
+当前文档中记录的结果为：
+
+| 指标     | MLP    | Attn   |
+| -------- | ------ | ------ |
+| MAE      | 0.5824 | 0.5830 |
+| MAPE     | 0.0208 | 0.0208 |
+| 估算得分 | 95.8   | 95.8   |
+
+## 7. 运行环境与依赖
+
+从当前脚本依赖看，核心环境要求如下：
+
+- Python 3.7
+- NumPy
+- PyTorch
+- scikit-learn
+
+若按本地 conda 环境复现，可使用：
 
 ```bash
 conda create -n predict_A python=3.7 -y
 conda activate predict_A
-pip install torch==1.13.1 numpy scikit-learn matplotlib
+pip install numpy torch scikit-learn
 ```
 
-注意：
-- 云端 PyTorch 1.8.1 不支持 `MultiheadAttention(batch_first=True)`，方案 B 已通过手动 permute 兼容
-- 模型权重使用 `pickle_protocol=2` 保存，确保跨版本加载
-- 所有代码仅使用 CPU，无 CUDA 依赖
+说明：
 
-### 7.3 跨设备迁移
+- 方案 B 的实现显式兼容不支持 `batch_first=True` 的旧版 `MultiheadAttention`
+- 代码全部以 CPU 为目标编写
+- MLP 权重保存使用了 `pickle_protocol=2`
 
-1. 复制整个 `predict_A/` 目录
-2. 创建 conda 环境 `predict_A`（见 7.2）
-3. 直接运行，无需额外配置
+## 8. 当前路径依赖与可运行性说明
 
-## 8. 使用说明
+这一部分是当前 README 最需要更新的地方。
 
-### 8.1 本地训练
+### 8.1 `main.py` 的路径假设
 
-```bash
-conda activate predict_A
+两套提交入口都通过相对路径加载权重：
 
-# 方案 A
-cd predict_A/MLP && python train.py
+- `MLP/main.py` 读取 `results/mymodel.pt`
+- `Attn/main.py` 读取 `./results/seq_attn_predictor.pth`
 
-# 方案 B
-cd predict_A/Attn && python train.py
-```
+因此，若直接在本地调用 `main.py`，当前工作目录应与对应方案目录匹配，或者需要保证权重文件以相同相对路径可见。
 
-### 8.2 本地验证
+### 8.2 `train.py` 的路径假设
 
-```bash
-cd predict_A
-python test_compare.py   # 同时测试两套方案（需 test/ 目录）
-```
+两份训练脚本都通过相对路径读取数据：
 
-### 8.3 平台提交
+- `MLP/train.py` 读取 `train_data.npy`，并在存在时读取 `test/extracted_test_x.npy` 与 `test/extracted_test_y.npy`
+- `Attn/train.py` 读取 `train_data.npy`
 
-1. 选择一套方案，将其 `results/` 下的权重文件上传到云端对应目录
-2. 在云端 `main.ipynb` 中将 Cell 75 替换为对应方案的提交代码
-3. 运行 Cell 76 验证输出
-4. 「提交作业」→「生成文件」→ 勾选 Cell 75 → 测试 → 提交
-5. 上传程序报告
+但在当前仓库结构下，共享数据文件位于项目根目录 `predict_A/`，而权重目录位于 `MLP/results/` 与 `Attn/results/`。因此：
 
-## 9. 注意事项
+- README 旧版本中写的 `cd predict_A/MLP && python train.py` 和 `cd predict_A/Attn && python train.py` 并不准确
+- 按当前仓库状态，若要直接复现训练，需要先处理相对路径问题，例如调整脚本中的路径、调整工作目录，或临时布置数据文件位置
 
-- `predict()` 函数签名与返回类型不可修改，返回值必须为 `numpy.ndarray`
-- Cell 75 必须自包含：所有 import、模型类定义、加载和 predict 函数
-- 模型路径使用相对路径（如 `results/mymodel.pt`）
-- 两套方案的模型架构、变量命名、预处理方式完全独立，不可混用权重
+换句话说，当前仓库更准确的状态是：
+
+- `main.py` 与现成权重可直接作为提交入口源码查看
+- `train.py` 保留了完整训练逻辑，但不是一个已经对当前目录结构完全对齐的一键训练脚本
+
+## 9. 其他说明
+
+- `测试提交指南.ipynb`、`MLP/main.ipynb` 与 `Attn/main.ipynb` 仍保留，主要用于平台提交流程与 notebook 版本代码
+- 两套方案的模型结构、预处理方式和权重文件彼此独立，不能混用

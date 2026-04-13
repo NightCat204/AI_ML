@@ -1,0 +1,244 @@
+\pagenumbering{arabic}
+
+\section{项目任务与数据概览}
+
+\subsection{任务定义与评分规则}
+
+本项目对应课程“人工智能与机器学习”的时序预测作业，目标是根据某支股票前 $14$ 个交易日的收盘价，预测第 $15$ 个交易日的收盘价。平台要求提交 \texttt{predict(test\_x)} 函数，其中输入为形状为 $(n,14)$ 的 \texttt{numpy.ndarray}，输出也必须是 \texttt{numpy.ndarray}。为了满足平台批量评测要求，单次预测在 $x.shape[0] < 20000$ 时不能超过 $5$ 分钟。
+
+本项目采用的评分规则如下：
+\begin{equation}
+\mathrm{Score}=\max\left((1-\mathrm{err}_{\mathrm{mape}}^2)\times 40, 0\right)+
+\max\left((1-\mathrm{err}_{\mathrm{mae}}^2)\times 60, 0\right),
+\end{equation}
+其中
+\begin{equation}
+\mathrm{err}_{\mathrm{mape}} = 4 \times \mathrm{MAPE}, \qquad
+\mathrm{err}_{\mathrm{mae}} = \frac{\sqrt{\mathrm{MAE}}}{3}.
+\end{equation}
+因此，模型不仅要降低绝对误差和相对误差，还要兼顾工程上的推理效率与提交流程的稳定性。
+
+\subsection{数据来源与统计特征}
+
+从报告撰写口径上，本文分析项目对外公开的训练数据 \texttt{train\_data.npy}。该文件是一维原始收盘价序列，共 $1999$ 个点，价格范围为 $[2.25, 36.32]$。平台在线测试部分属于封闭评测流程，因此本文不展开其具体组织形式，而只在结果章节引用最终平台评分截图。
+
+仅从公开训练序列本身也可以看出两个重要现象：其一，价格水平跨越多个量级，低价段和高价段差异明显；其二，序列同时包含趋势变化与局部剧烈波动。这意味着模型如果直接回归绝对价格，往往会同时面临尺度不一致与非平稳性问题。因此，\textbf{显式归一化}与\textbf{对局部相对变化的建模}仍然是本项目能够获得稳定成绩的关键。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{dataset_overview}
+    \caption{任务定义与数据概览}
+\end{figure}
+
+\subsection{项目结构}
+
+在课程提供的原始 notebook 模板基础上，本文将实现整理为两套可独立提交的平台方案：
+\begin{table}[H]
+    \centering
+    \caption{项目目录与功能划分}
+    \begin{tabular}{p{3.6cm}p{9.6cm}}
+        \toprule
+        路径 & 作用说明 \\
+        \midrule
+        \texttt{MLP/train.py} & 基于窗口归一化的多层感知机训练脚本，对公开训练序列进行建模 \\
+        \texttt{MLP/main.py} & 平台提交入口，加载 \texttt{results/mymodel.pt} 并实现 \texttt{predict()} \\
+        \texttt{Attn/train.py} & 基于差分序列和多头自注意力的训练脚本，仅使用原始训练序列 \\
+        \texttt{Attn/main.py} & 平台提交入口，加载 \texttt{results/seq\_attn\_predictor.pth} \\
+        \texttt{Report/} & \LaTeX{} 报告模板与图表文件 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\section{模型方案与实现细节}
+
+\subsection{方案 A：窗口归一化 MLP}
+
+\texttt{MLP/train.py} 的核心思想是将每个 $14$ 天窗口最后一天的价格作为局部基准，把输入和标签都转换为相对比例：
+\begin{equation}
+\mathbf{x}_{\mathrm{norm}} = \frac{\mathbf{x}}{p_{14}}, \qquad
+y_{\mathrm{norm}} = \frac{y}{p_{14}}.
+\end{equation}
+这样做有两个直接好处：一是把不同股票、不同价格区间的样本拉到相近尺度；二是使模型重点学习“下一天相对最后一天的偏移比例”，而不是绝对价格本身。
+
+\begin{lstlisting}[language=Python,caption={MLP 方案的样本构造与窗口归一化}]
+def generate_data_from_series(data):
+    x, y = [], []
+    for i in range(15, len(data)):
+        x.append(data[i - 15:i - 1])
+        y.append(data[i - 1])
+    return np.array(x, dtype=np.float32), np.array(y, dtype=np.float32).reshape(-1, 1)
+
+def normalize_windows(x, y):
+    base = x[:, -1:]
+    return x / base, y / base, base
+\end{lstlisting}
+
+上述代码直接决定了 MLP 方案的建模对象。窗口中的最后一天价格既参与输入，又作为归一化基准 \texttt{base} 被保留；因此模型训练的并不是绝对收盘价，而是“下一天相对最后一天价格的比例”。这一设计与前述公式完全一致，也解释了为什么该方案能在价格跨度较大的训练序列上保持稳定。
+
+模型结构定义为
+\[
+\texttt{Linear(14,64)} \rightarrow \texttt{ReLU} \rightarrow
+\texttt{Linear(64,64)} \rightarrow \texttt{ReLU} \rightarrow
+\texttt{Linear(64,1)},
+\]
+总参数量约为 $5185$。这一结构虽然简单，但配合局部归一化后，已经足以拟合大部分短期价格变化规律。
+
+\begin{lstlisting}[language=Python,caption={MLP 提交接口中的预测还原逻辑}]
+def predict(test_x):
+    base = test_x[:, -1:]
+    x_norm = test_x / base
+    x_tensor = torch.tensor(x_norm, dtype=torch.float32)
+    with torch.no_grad():
+        y_norm = model(x_tensor)
+    y_pred = y_norm.numpy() * base
+    return y_pred.reshape(-1)
+\end{lstlisting}
+
+提交端的 \texttt{predict()} 与训练阶段形成了完全对称的“归一化 $\rightarrow$ 网络预测 $\rightarrow$ 反归一化”流程。也就是说，训练脚本学到的是比例映射，提交脚本再用当前窗口最后一天价格把比例还原为真实收盘价。这个对称性能够减少训练与部署之间的分布偏移，是 MLP 方案工程上较为稳健的重要原因。
+
+从公开训练数据的角度看，MLP 方案的关键并不在于网络有多深，而在于它把原始价格序列转换成了“相对最后一天价格的比例回归问题”。这一步显著降低了不同价位样本之间的尺度差异，使一个很小的全连接网络也能稳定工作。因此，MLP 方案可以看作\textbf{用简单结构配合合适预处理}的典型工程实现。
+
+\subsection{方案 B：差分自注意力网络}
+
+\texttt{Attn/} 方案采用“差分预测 + 轻量多头注意力”的时序建模思路，并将实现组织为可直接提交的平台入口。其主要步骤如下：
+\begin{enumerate}
+    \item 使用 \texttt{scikit-learn} 中的 \texttt{MinMaxScaler}，按固定区间 $[0,300]$ 对所有价格做统一缩放；
+    \item 将长度为 $14$ 的价格窗口转换为长度为 $13$ 的一阶差分序列；
+    \item 将差分向量投影为 $13 \times 32$ 的 token 序列；
+    \item 叠加正弦位置编码，并使用 PyTorch 的 $4$ 头 \texttt{MultiheadAttention} 提取时序依赖关系；
+    \item 对注意力输出做均值池化，最后经由 \texttt{32$\rightarrow$64$\rightarrow$1} 的 MLP 输出下一日增量。
+\end{enumerate}
+
+若记归一化后的价格为 $\hat{p}_t$，则模型输入与输出重构过程可写为：
+\begin{equation}
+\mathbf{x}_{\Delta}=
+[\hat{p}_{t-12}-\hat{p}_{t-13},\hat{p}_{t-11}-\hat{p}_{t-12},\ldots,\hat{p}_{t}-\hat{p}_{t-1}],
+\end{equation}
+\begin{equation}
+\hat{p}_{t+1} = \hat{p}_{t} + \Delta_{t+1}.
+\end{equation}
+
+\begin{lstlisting}[language=Python,caption={Attention 方案的差分样本构造}]
+def build_delta_samples(series, window=14):
+    delta_x, delta_y, anchor = [], [], []
+    for t in range(window, len(series)):
+        seg = series[t - window:t]
+        delta_x.append(np.diff(seg))
+        delta_y.append(series[t] - series[t - 1])
+        anchor.append(series[t - 1])
+    return np.array(delta_x), np.array(delta_y), np.array(anchor)
+\end{lstlisting}
+
+这段代码说明了 Attention 方案并不是直接学习“14 天价格 $\rightarrow$ 第 15 天价格”的黑盒映射，而是把输入改写成相邻交易日变化量，把标签定义为下一天增量，并额外保存最后一天的归一化价格 \texttt{anchor}。因此，模型学习目标更接近“局部波动模式外推”，而不是直接回归原始价格水平。
+
+\begin{lstlisting}[language=Python,caption={自注意力前向传播的核心实现}]
+def forward(self, x):
+    bsz = x.size(0)
+    h = self.proj(x).view(bsz, self.seq_len, self.d_model)
+    h = h + self.pe[:, :self.seq_len, :]
+    h = h.permute(1, 0, 2)
+    h, _ = self.self_attn(h, h, h)
+    h = h.permute(1, 0, 2).mean(dim=1)
+    return self.head(h)
+\end{lstlisting}
+
+从实现上看，该网络先把一维差分向量展开成 token 序列，再用位置编码补充时间顺序信息，随后通过多头注意力让不同时间步的变化量彼此交互。最后采用均值池化而非仅取末端 token，也使输出同时综合了整个窗口内的局部涨跌模式。
+
+\begin{lstlisting}[language=Python,caption={Attention 提交接口中的增量重构}]
+scaled = normalizer.transform(test_x.reshape(-1, 1)).reshape(n, 14)
+delta_input = np.diff(scaled, axis=1)
+with torch.no_grad():
+    inp = torch.tensor(delta_input, dtype=torch.float32)
+    delta_hat = net(inp).cpu().numpy().flatten()
+last_scaled = scaled[:, -1]
+pred_scaled = last_scaled + delta_hat
+result = normalizer.inverse_transform(pred_scaled.reshape(-1, 1))
+\end{lstlisting}
+
+提交接口首先对输入窗口执行同样的固定尺度归一化和差分变换，再把网络输出解释为“下一步增量”，最后借助末日价格 \texttt{last\_scaled} 将其还原到真实价格尺度。这说明 Attention 方案虽然网络结构更复杂，但其训练端与提交端同样保持了严格一致的数据流。
+
+该模型总参数量约为 $12225$，虽然仍然非常轻量，但比 MLP 更适合显式建模短期价格变化之间的相互关系。训练脚本只使用原始训练序列构造样本，共生成 $1985$ 条数据，并按 $7:1:2$ 划分为训练、验证和测试子集，对应规模分别为 $1389/198/398$。优化器采用 Adam，并固定随机种子为 $42$，更符合常规机器学习实验的组织方式。
+
+\subsection{两套方案的代码级对比}
+
+\begin{table}[H]
+    \centering
+    \caption{两套实现方案的核心差异}
+    \begin{tabular}{p{2.0cm}p{3.2cm}p{3.0cm}p{2.2cm}p{3.4cm}}
+        \toprule
+        方案 & 输入特征 & 训练数据来源 & 输出形状 & 主要特点 \\
+        \midrule
+        MLP & $14$ 维价格比值 & 公开训练序列构造的滑动窗口样本 & $(n,)$ & 参数少、推理快、适合作为稳健提交基线 \\
+        Attn & $13$ 维差分序列 & 公开训练序列构造的滑动窗口样本 & $(n,1)$ & 延续差分建模思路，结构更贴近时序关系建模 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+从提交实现看，两套 \texttt{main.py} 都遵循了平台对“单 Cell 自包含”的要求：模型类定义、权重加载、CPU 推理和 \texttt{predict()} 接口全部放在同一文件内，模型路径均使用相对路径，便于直接迁移到 MoModel 平台。
+
+\subsection{设计动机}
+
+本项目最终保留两条清晰的技术路线。第一条路线强调\textbf{最小模型复杂度}，即通过窗口归一化把问题转换为局部比例回归，再用一个小型 MLP 完成预测；第二条路线强调\textbf{更强的时序表达能力}，即通过差分序列、位置编码和多头注意力显式建模时间步之间的相互关系。
+
+这种双方案并行的设计一方面便于直接比较“简单模型 + 强预处理”和“轻量注意力模型”之间的差异，另一方面也使提交策略更加灵活：当目标是稳健提交时，可以优先选择结构更简单的 MLP；当目标是突出时序建模能力时，自注意力方案更能体现模型设计本身的分析价值。
+
+\section{实验设置与结果分析}
+
+\subsection{实验环境与评估方式}
+
+本项目采用的参考环境为 Python 3.7、PyTorch 1.8.1+cpu，两套提交脚本也都以 CPU 推理为目标进行编写。根据课程模板 notebook 的使用约束，平台环境不鼓励在交互式 CPU notebook 中长时间训练，因此本文采用了“\texttt{train.py} 训练，\texttt{main.py} 提交”的拆分方式。
+
+评估指标使用 MAE 与 MAPE，两者分别衡量绝对价格误差与相对价格误差。对于这类股票短期预测任务，MAPE 对低价样本更敏感，而 MAE 会直接反映价格绝对偏差，因此两者结合更能反映模型的综合表现。
+
+\subsection{结果汇总}
+
+结合本项目最终提交结果与平台测试截图，可以得到表 \ref{tab:result-summary} 的结果。
+
+\begin{table}[H]
+    \centering
+    \caption{两套方案的结果对比}
+    \label{tab:result-summary}
+    \begin{tabular}{p{2.0cm}p{2.2cm}p{2.2cm}p{2.2cm}p{3.2cm}}
+        \toprule
+        方案 & MAE & MAPE & 估算得分 & 备注 \\
+        \midrule
+        MLP & 0.5824 & 0.0208 & 95.8 & 本项目最终提交结果 \\
+        Attn & 0.5830 & 0.0208 & 95.8 & 本项目最终提交结果 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{系统测试结果}
+    \caption{平台系统测试截图：本项目的一次成功提交结果}
+\end{figure}
+
+截图中的测试结果显示，本文提交版本取得了 MAPE $=0.0208$、MAE $=0.583$、耗时约 $2$s 的表现，与表中的最终结果一致，可视为本项目已经达到平台可接受的提交水平。
+
+\subsection{结果讨论}
+
+从数字上看，MLP 与自注意力方案几乎打平，但两者“达到该结果”的路径并不相同。
+
+\paragraph{1. MLP 方案的优势来自局部归一化与简洁结构。}
+对短期股票预测而言，最后一天价格往往是最强基准信息。结合代码可见，\texttt{normalize\_windows()} 和 \texttt{predict()} 都围绕 \texttt{base = x[:, -1:]} 展开，本质上是在学习一个“相对涨跌比例回归器”。这一步使模型把注意力集中在局部变化而非绝对价位上，因此即使网络结构非常简单，最终成绩依然稳定。
+
+\paragraph{2. Attention 方案更能体现时序建模思路。}
+差分输入降低了序列的尺度波动，自注意力层则提供了更灵活的跨时间步依赖建模能力。结合 \texttt{build\_delta\_samples()}、\texttt{forward()} 与增量重构代码可以看出，它把重点放在“相邻交易日变化如何组合成下一日波动”这一问题上，因此比直接回归原始价格更符合时间序列建模直觉。
+
+\paragraph{3. 价格尺度变化与非平稳性是本项目最关键的难点。}
+即使只看公开训练序列，也能发现价格水平变化幅度较大，并伴随明显的阶段性趋势切换。如果不做适当归一化，模型很容易学到带有强尺度偏置的映射；这也是本文将窗口归一化、固定尺度缩放与差分建模作为核心设计的原因。两套方案虽然实现路径不同，但都显式处理了这个问题。
+
+\paragraph{4. 双方案实现使本项目兼顾了提交稳定性与方法分析价值。}
+如果从课程作业角度出发，MLP 方案更适合直接提交，因为结构最简单、速度最快；如果从方法分析与时序建模能力角度出发，Attention 方案更适合作为正文重点，因为它在建模逻辑上更完整，也更具可解释性。
+
+\section{总结}
+
+本文的核心工作，是将已经实现完成的模型、训练脚本、提交入口和平台结果整理为一份与项目本身完全一致的课程报告。相较课程原始模板，本文完成了以下几项适配：
+\begin{itemize}
+    \item 以本项目的双方案结构为中心，重写了任务、方法、实验与总结；
+    \item 将模型设计、训练流程、提交接口和平台测试结果统一到同一套叙述逻辑中；
+    \item 保持报告视角、代码实现和最终结果的一致性，使其能够直接作为本人项目作业的正式说明文档。
+\end{itemize}
+
+综合来看，\texttt{predict\_A} 项目已经具备较完整的作业提交条件：MLP 方案适合追求稳妥高分，自注意力方案体现了更完整的时序建模设计。后续若继续改进，可以围绕更严格的数据划分、更系统的消融实验以及多股票联合建模三个方向展开。

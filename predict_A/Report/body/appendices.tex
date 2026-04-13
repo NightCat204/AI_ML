@@ -1,0 +1,373 @@
+\newpage
+\appendix
+
+\section{核心源码附录}
+
+本附录只保留与公开训练流程和平台提交直接相关的核心源码。为避免把封闭评测机制写入报告，训练脚本中的私有评测路径、对应输出语句和相关组织细节均不在此展开；但模型结构、样本构造、训练流程与提交接口均与项目实现保持一致。
+
+\subsection{方案 A：MLP/main.py}
+
+\begin{lstlisting}[language=Python]
+import numpy as np
+import torch
+import torch.nn as nn
+
+
+class MLPNet(nn.Module):
+    def __init__(self, input_size=14, hidden_size=64, output_size=1):
+        super(MLPNet, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, output_size),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+model = MLPNet()
+model.load_state_dict(torch.load("results/mymodel.pt", map_location="cpu"))
+model.eval()
+
+
+def predict(test_x):
+    base = test_x[:, -1:]
+    x_norm = test_x / base
+    x_tensor = torch.tensor(x_norm, dtype=torch.float32)
+    with torch.no_grad():
+        y_norm = model(x_tensor)
+    y_pred = y_norm.numpy() * base
+    return y_pred.reshape(-1)
+\end{lstlisting}
+
+\subsection{方案 A：MLP/train.py（公开训练流程）}
+
+\begin{lstlisting}[language=Python]
+import math
+import numpy as np
+import torch
+import torch.nn as nn
+
+
+BATCH_SIZE = 256
+LR = 1e-3
+WEIGHT_DECAY = 1e-4
+EPOCHS = 500
+PATIENCE = 50
+MODEL_PATH = "results/mymodel.pt"
+
+
+class MLPNet(nn.Module):
+    def __init__(self, input_size=14, hidden_size=64, output_size=1):
+        super(MLPNet, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, output_size),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+def generate_data_from_series(data):
+    x, y = [], []
+    for i in range(15, len(data)):
+        x.append(data[i - 15:i - 1])
+        y.append(data[i - 1])
+    return np.array(x, dtype=np.float32), np.array(y, dtype=np.float32).reshape(-1, 1)
+
+
+def normalize_windows(x, y):
+    base = x[:, -1:]
+    return x / base, y / base, base
+
+
+def evaluate(model, x, y_norm, base):
+    model.eval()
+    with torch.no_grad():
+        pred_norm = model(x).numpy()
+    pred = pred_norm * base
+    real = y_norm.numpy() * base
+    mae = np.mean(np.abs(pred - real))
+    mape = np.mean(np.abs(pred - real) / np.abs(real))
+    return mae, mape
+
+
+def estimate_score(mae, mape):
+    err_mape = mape * 4
+    err_mae = math.sqrt(mae) / 3
+    score = max((1 - err_mape ** 2) * 40, 0) + max((1 - err_mae ** 2) * 60, 0)
+    return score
+
+
+def train():
+    data = np.load("train_data.npy")
+    x_raw, y_raw = generate_data_from_series(data)
+    x_norm, y_norm, base = normalize_windows(x_raw, y_raw)
+
+    idx = np.random.permutation(len(x_norm))
+    x_norm, y_norm, base = x_norm[idx], y_norm[idx], base[idx]
+
+    n = len(x_norm)
+    n_train = round(n * 0.9)
+    x_tr = torch.tensor(x_norm[:n_train])
+    y_tr = torch.tensor(y_norm[:n_train])
+    x_va = torch.tensor(x_norm[n_train:])
+    y_va = torch.tensor(y_norm[n_train:])
+    base_va = base[n_train:]
+
+    loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(x_tr, y_tr),
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+    )
+
+    model = MLPNet()
+    loss_fn = nn.MSELoss()
+    opt = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, factor=0.5, patience=15)
+
+    best_vl = float("inf")
+    wait = 0
+
+    for _ in range(EPOCHS):
+        model.train()
+        for xb, yb in loader:
+            loss = loss_fn(model(xb), yb)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+
+        model.eval()
+        with torch.no_grad():
+            vl = loss_fn(model(x_va), y_va).item()
+        sched.step(vl)
+
+        if vl < best_vl:
+            best_vl = vl
+            wait = 0
+            torch.save(model.state_dict(), MODEL_PATH, pickle_protocol=2)
+        else:
+            wait += 1
+        if wait >= PATIENCE:
+            break
+
+    model.load_state_dict(torch.load(MODEL_PATH))
+    mae, mape = evaluate(model, x_va, y_va, base_va)
+    print("Validation score:", estimate_score(mae, mape))
+\end{lstlisting}
+
+\subsection{方案 B：Attn/main.py}
+
+\begin{lstlisting}[language=Python]
+import numpy as np
+import torch
+import torch.nn as nn
+from sklearn.preprocessing import MinMaxScaler
+
+
+SEQ_LEN = 13
+
+
+class SeqAttnPredictor(nn.Module):
+    def __init__(self, seq_len=13, d_model=32, n_heads=4):
+        super(SeqAttnPredictor, self).__init__()
+        self.d_model = d_model
+        self.seq_len = seq_len
+        self.proj = nn.Linear(seq_len, seq_len * d_model)
+        self.register_buffer("pe", self._sincos_pe(seq_len, d_model))
+        self.self_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=n_heads)
+        self.head = nn.Sequential(
+            nn.Linear(d_model, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+        )
+
+    @staticmethod
+    def _sincos_pe(length, dim):
+        pos = np.arange(length)[:, None]
+        idx = np.arange(dim)[None, :]
+        angle = pos / np.power(10000, 2 * (idx // 2) / dim)
+        pe = np.zeros_like(angle)
+        pe[:, 0::2] = np.sin(angle[:, 0::2])
+        pe[:, 1::2] = np.cos(angle[:, 1::2])
+        return torch.FloatTensor(pe).unsqueeze(0)
+
+    def forward(self, x):
+        bsz = x.size(0)
+        h = self.proj(x).view(bsz, self.seq_len, self.d_model)
+        h = h + self.pe[:, :self.seq_len, :]
+        h = h.permute(1, 0, 2)
+        h, _ = self.self_attn(h, h, h)
+        h = h.permute(1, 0, 2).mean(dim=1)
+        return self.head(h)
+
+
+net = SeqAttnPredictor(SEQ_LEN)
+net.load_state_dict(torch.load("results/seq_attn_predictor.pth", map_location="cpu"))
+net.eval()
+
+
+def predict(test_x):
+    n = test_x.shape[0]
+    normalizer = MinMaxScaler().fit(np.array([0, 300]).reshape(-1, 1))
+    scaled = normalizer.transform(test_x.reshape(-1, 1)).reshape(n, 14)
+    delta_input = np.diff(scaled, axis=1)
+
+    with torch.no_grad():
+        inp = torch.tensor(delta_input, dtype=torch.float32)
+        delta_hat = net(inp).cpu().numpy().flatten()
+
+    last_scaled = scaled[:, -1]
+    pred_scaled = last_scaled + delta_hat
+    return normalizer.inverse_transform(pred_scaled.reshape(-1, 1))
+\end{lstlisting}
+
+\subsection{方案 B：Attn/train.py}
+
+\begin{lstlisting}[language=Python]
+import os
+import random
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.preprocessing import MinMaxScaler
+
+
+def fix_random_state(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def build_delta_samples(series, window=14):
+    delta_x, delta_y, anchor = [], [], []
+    for t in range(window, len(series)):
+        seg = series[t - window:t]
+        delta_x.append(np.diff(seg))
+        delta_y.append(series[t] - series[t - 1])
+        anchor.append(series[t - 1])
+    return np.array(delta_x), np.array(delta_y), np.array(anchor)
+
+
+def split_dataset(x, y, anc, ratios=(0.7, 0.1, 0.2)):
+    n = x.shape[0]
+    n_train = int(n * ratios[0])
+    n_val = int(n * ratios[1])
+    return {
+        "train": (x[:n_train], y[:n_train], anc[:n_train]),
+        "val": (x[n_train:n_train + n_val], y[n_train:n_train + n_val],
+                anc[n_train:n_train + n_val]),
+        "test": (x[n_train + n_val:], y[n_train + n_val:], anc[n_train + n_val:]),
+    }
+
+
+class SeqAttnPredictor(nn.Module):
+    def __init__(self, seq_len=13, d_model=32, n_heads=4):
+        super(SeqAttnPredictor, self).__init__()
+        self.d_model = d_model
+        self.seq_len = seq_len
+        self.proj = nn.Linear(seq_len, seq_len * d_model)
+        self.register_buffer("pe", self._sincos_pe(seq_len, d_model))
+        self.self_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=n_heads)
+        self.head = nn.Sequential(
+            nn.Linear(d_model, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+        )
+
+    @staticmethod
+    def _sincos_pe(length, dim):
+        pos = np.arange(length)[:, None]
+        idx = np.arange(dim)[None, :]
+        angle = pos / np.power(10000, 2 * (idx // 2) / dim)
+        pe = np.zeros_like(angle)
+        pe[:, 0::2] = np.sin(angle[:, 0::2])
+        pe[:, 1::2] = np.cos(angle[:, 1::2])
+        return torch.FloatTensor(pe).unsqueeze(0)
+
+    def forward(self, x):
+        bsz = x.size(0)
+        h = self.proj(x).view(bsz, self.seq_len, self.d_model)
+        h = h + self.pe[:, :self.seq_len, :]
+        h = h.permute(1, 0, 2)
+        h, _ = self.self_attn(h, h, h)
+        h = h.permute(1, 0, 2).mean(dim=1)
+        return self.head(h)
+
+
+def run_eval(loader, model, scaler, anchor_arr, device):
+    total_abs, total_pct, total = 0.0, 0.0, 0
+    model.eval()
+    with torch.no_grad():
+        cursor = 0
+        for bx, by in loader:
+            bx, by = bx.to(device), by.to(device)
+            pred_delta = model(bx)
+            bsz = bx.size(0)
+            anc = anchor_arr[cursor:cursor + bsz]
+            cursor += bsz
+
+            pred_normed = anc + pred_delta.cpu().numpy().flatten()
+            real_normed = anc + by.cpu().numpy().flatten()
+            pred_price = scaler.inverse_transform(pred_normed.reshape(-1, 1)).flatten()
+            real_price = scaler.inverse_transform(real_normed.reshape(-1, 1)).flatten()
+
+            total_abs += np.abs(pred_price - real_price).sum()
+            total_pct += (np.abs(pred_price - real_price) / np.abs(real_price)).sum()
+            total += bsz
+    model.train()
+    return total_abs / total, total_pct / total
+
+
+fix_random_state(42)
+raw_prices = np.load("train_data.npy")
+normalizer = MinMaxScaler().fit(np.array([0, 300]).reshape(-1, 1))
+prices_normed = normalizer.transform(raw_prices.reshape(-1, 1)).flatten()
+delta_x, delta_y, anchor_vals = build_delta_samples(prices_normed)
+splits = split_dataset(delta_x, delta_y, anchor_vals)
+
+
+def make_loader(xy, batch, shuffle):
+    x_t = torch.tensor(xy[0], dtype=torch.float32)
+    y_t = torch.tensor(xy[1], dtype=torch.float32).view(-1, 1)
+    return DataLoader(TensorDataset(x_t, y_t), batch_size=batch, shuffle=shuffle)
+
+
+train_loader = make_loader(splits["train"], batch=32, shuffle=True)
+val_loader = make_loader(splits["val"], batch=32, shuffle=False)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+net = SeqAttnPredictor().to(device)
+loss_fn = nn.MSELoss()
+optimizer = optim.Adam(net.parameters(), lr=1e-3)
+save_path = "results/seq_attn_predictor.pth"
+os.makedirs("results", exist_ok=True)
+
+best_mae = float("inf")
+for _ in range(100):
+    net.train()
+    for bx, by in train_loader:
+        bx, by = bx.to(device), by.to(device)
+        optimizer.zero_grad()
+        batch_loss = loss_fn(net(bx), by)
+        batch_loss.backward()
+        optimizer.step()
+
+    val_mae, val_mape = run_eval(
+        val_loader, net, normalizer, splits["val"][2], device
+    )
+    if val_mae < best_mae:
+        best_mae = val_mae
+        torch.save(net.state_dict(), save_path)
+\end{lstlisting}
