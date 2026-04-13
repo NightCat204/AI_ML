@@ -83,5 +83,41 @@ build/
 # ==============================================================================
 # predict_A 项目
 # ==============================================================================
+# 大体积数据文件（从平台获取，不入库）
+predict_A/train_data.npy
+predict_A/test/
+predict_A/Attn/train_data.npy
+
+# 训练产物（可通过 train.py 重新生成）
+predict_A/MLP/results/*.pt
+predict_A/Attn/results/*.pth
+predict_A/Attn/results/tb_results/*.pth
+
+# 平台自动生成文件
+predict_A/MLP/main.py
+predict_A/Attn/main.py
+
+# 测试脚本（本地调试用）
+predict_A/test_compare.py
+
 # 杂项
 predict_A/.git/
+
+# ==============================================================================
+# Classification 项目
+# ==============================================================================
+# 数据集（从平台获取，不入库）
+Classification/datasets/
+
+# ResNet 训练产物（体积大，可通过训练脚本重新生成）
+Classification/resnet/results/*.pth
+
+# 原始 MindSpore 方案（已弃用，保留代码但排除大文件）
+Classification/default/src_mindspore/mobilenetv2-200_1067_cpu_gpu.ckpt
+Classification/default/results/
+
+# Jupyter Notebook Checkpoints
+Classification/**/.ipynb_checkpoints/
+
+# 平台自动生成文件
+Classification/main.py
