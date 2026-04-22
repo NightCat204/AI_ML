@@ -1,0 +1,266 @@
+\pagenumbering{arabic}
+
+\section{问题重述}
+
+本实验任务是为标准 $8\times 8$ 黑白棋（Reversi/Othello）实现一个自动落子程序。平台在每一步调用
+\texttt{AIPlayer.get\_move(board)}，程序需要读取当前棋盘，在全部合法位置中选择一步并返回如
+\texttt{E6} 这样的坐标；如果当前玩家无合法着法，则返回 \texttt{None}。棋盘使用 \texttt{X} 表示黑棋、
+\texttt{O} 表示白棋，黑白双方轮流落子，合法落子必须在至少一个方向夹住对方棋子并完成翻转。
+
+黑白棋的难点在于前中期的局部吃子数并不等同于最终优势。角点、边线、行动力、危险的 X 位和 C 位、
+前沿子数量都会影响后续局面。因此，本项目的目标不是简单选择当前翻子最多的一步，而是在有限时间内
+尽量评估每一步对后续局势的影响，使智能体在初级、中级和高级机器人对战中均能稳定获胜。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.42\textwidth]{board}
+    \caption{黑白棋初始局面示意}
+\end{figure}
+
+\section{设计思想}
+
+\subsection{总体路线}
+
+课程材料中给出的基本思路是使用蒙特卡洛树搜索，通过选择、扩展、模拟和回传逐步估计各个动作的价值。
+在实际实现过程中，我先保留了这种“向前看若干步再评价局面”的思想，但将随机模拟替换为确定性的博弈树搜索：
+当前程序采用两个 $64$ 位整数表示棋盘，并在此基础上进行迭代加深 Principal Variation Search（PVS）。
+它可以看作是在 Alpha-Beta 剪枝上加入主变优先和零窗口试探，从而在相同时间内搜索更深的分支。
+
+最终策略由四个部分组成：
+\begin{itemize}
+    \item \textbf{位棋盘表示}：用整数位运算完成合法步生成、翻转和邻接格计算，减少棋盘复制开销；
+    \item \textbf{迭代加深 PVS}：从浅层到深层逐步搜索，超时时回退到上一层完整结果；
+    \item \textbf{置换表与动作排序}：缓存已搜索局面，并优先搜索角点、置换表推荐步和高位置权重步；
+    \item \textbf{分阶段启发式评估}：开局重视行动力，中盘重视角和危险位，残局增加棋子差与奇偶性权重。
+\end{itemize}
+
+\subsection{位棋盘建模}
+
+程序将棋盘从二维列表转换为两个整数：一个保存当前方棋子，一个保存对手棋子。第 $r$ 行第 $c$ 列对应
+第 $8r+c$ 个二进制位。八个搜索方向被统一写成 \texttt{DIRECTIONS} 表，配合边界掩码避免跨行移位。
+这样，合法步生成和落子翻转都可以复用同一个方向移动函数。
+
+\begin{lstlisting}[language=Python,caption={八方向位移和合法步生成}]
+DIRECTIONS = (
+    (1, KEEP_FROM_A), (-1, KEEP_FROM_H),
+    (8, FULL_BOARD), (-8, FULL_BOARD),
+    (9, KEEP_FROM_A), (7, KEEP_FROM_H),
+    (-7, KEEP_FROM_A), (-9, KEEP_FROM_H),
+)
+
+def _shift(bits, step, file_mask):
+    if step > 0:
+        return ((bits << step) & file_mask) & FULL_BOARD
+    return (bits >> -step) & file_mask
+
+def _legal_moves(us, them):
+    blank = FULL_BOARD ^ (us | them)
+    choices = 0
+    for step, file_mask in DIRECTIONS:
+        captured_line = _shift(us, step, file_mask) & them
+        for _ in range(5):
+            captured_line |= _shift(captured_line, step, file_mask) & them
+        choices |= _shift(captured_line, step, file_mask) & blank
+    return choices & FULL_BOARD
+\end{lstlisting}
+
+由于黑白棋每个方向最多连续经过 $6$ 个对方棋子，合法步生成中展开固定次数即可覆盖所有情况。
+与直接遍历二维数组相比，位棋盘写法把大量判断压缩为按位与、或、移位，适合在搜索树中反复调用。
+
+\subsection{搜索框架}
+
+主流程首先处理无子可下、唯一合法步和可占角点这三类简单情况。若局面仍需搜索，则根据剩余空位数分配时间，
+清空置换表，从深度 $1$ 开始迭代加深。每一层搜索完成后更新当前最优步；若本层尚未完成便超时，
+程序捕获 \texttt{SearchTimeout} 并返回上一层结果，从而保证平台调用始终有合法输出。
+
+\begin{lstlisting}[language=Python,caption={主决策流程伪代码}]
+def get_move(board):
+    us, them = board_to_bitboards(board)
+    legal = legal_moves(us, them)
+    if legal is empty:
+        return None
+    if legal has only one move:
+        return that move
+    if legal contains a corner:
+        return best corner move
+
+    deadline = now + time_budget(empty_count)
+    best = first move after move ordering
+    for depth from 1 to depth_limit:
+        candidate = root_search(us, them, depth, best)
+        if this depth finishes:
+            best = candidate
+    return best
+\end{lstlisting}
+
+非根节点采用 Negamax 形式的 PVS。每个节点先查置换表；若缓存深度足够，则根据精确值、下界或上界直接返回
+或收紧搜索窗口。对第一个候选步使用完整窗口搜索，对后续步先用零窗口判断是否可能超过当前 $\alpha$，
+只有可能成为新主变时才重新以完整窗口搜索。
+
+\begin{lstlisting}[language=Python,caption={PVS 搜索核心}]
+for i, move in enumerate(ordered):
+    next_us, next_them = _play(us, them, move)
+    if i == 0:
+        value = -self._pvs(next_them, next_us, depth - 1,
+                           -beta, -alpha, False)
+    else:
+        value = -self._pvs(next_them, next_us, depth - 1,
+                           -alpha - 1, -alpha, False)
+        if alpha < value < beta:
+            value = -self._pvs(next_them, next_us, depth - 1,
+                               -beta, -value, False)
+    alpha = max(alpha, value)
+    if alpha >= beta:
+        break
+\end{lstlisting}
+
+\subsection{评估函数与动作排序}
+
+评估函数并不单纯比较棋子数，而是综合七类特征：行动力、角点、角邻压力、位置权重、前沿子、边线、
+棋子差以及残局奇偶性。不同阶段的权重如下表所示。
+
+\begin{table}[H]
+    \centering
+    \caption{分阶段评估权重}
+    \begin{tabular}{lccc}
+        \toprule
+        特征 & 开局 $>40$ 空位 & 中盘 $17$--$40$ 空位 & 残局 $\le 16$ 空位 \\
+        \midrule
+        行动力 & 10 & 8 & 5 \\
+        角点 & 20 & 30 & 35 \\
+        角邻压力 & 12 & 10 & 4 \\
+        位置权重 & 4 & 3 & 2 \\
+        前沿子 & 3 & 3 & 4 \\
+        边线 & 1 & 2 & 4 \\
+        棋子差 & 0 & 2 & 12 \\
+        奇偶性 & 0 & 0 & 8 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+动作排序与评估函数相互配合。程序优先搜索角点和置换表推荐步，对 X 位和 C 位施加强惩罚，同时估计落子后
+对手合法步数量。排序质量越高，Alpha-Beta 剪枝越早发生，PVS 的零窗口试探也越容易命中。
+
+\begin{lstlisting}[language=Python,caption={动作排序的主要评分项}]
+value = SQUARE_TABLE[index] * 8
+if move & CORNER_MASK:
+    value += 200000
+if move == priority_move:
+    value += 100000
+if move & DIAGONAL_DANGER:
+    value -= 6000
+elif move & EDGE_DANGER:
+    value -= 2500
+
+next_us, next_them = _play(us, them, move)
+value -= _count_bits(_legal_moves(next_them, next_us)) * 80
+value += (_count_bits(next_us) - _count_bits(us)) * 8
+\end{lstlisting}
+
+\subsection{动态时间与残局精算}
+
+非残局阶段搜索深度上限保持为 \texttt{max\_depth = 12}。当空位很少时，程序会关闭静态评估并搜索到终局，
+终局分数使用 $\pm 10^6+\text{净胜子}$，使胜负优先于普通启发式分数。
+
+\begin{table}[H]
+    \centering
+    \caption{时间预算与残局阈值}
+    \begin{tabular}{lccc}
+        \toprule
+        剩余空位 & 时间预算 & 通常深度 & 说明 \\
+        \midrule
+        $>50$ & 1.2 s & 12 & 开局分支多，快速选择稳健步 \\
+        $41$--$50$ & 2.2 s & 12 & 开始增加搜索时间 \\
+        $29$--$40$ & 3.5 s & 12 & 中盘需要更细判断 \\
+        $17$--$28$ & 4.2 s & 12 & 兼顾深度和响应时间 \\
+        $11$--$16$ & 4.8 s & 12 & 接近残局，准备精算 \\
+        $\le 10$ & 8.0 s & 空位数 & 直接搜索到终局 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+另外，当空位不超过 $14$ 且合法步数不超过 $6$ 时，残局阈值提高到 $14$，用于捕捉分支较窄的可精确求解局面。
+
+\section{代码内容}
+
+项目提交文件为 \texttt{main.py}，核心结构如下：
+\begin{itemize}
+    \item 常量区：棋盘掩码、角点、危险位、边线、位置权重表和八方向移动表；
+    \item 位棋盘工具函数：\texttt{\_shift}、\texttt{\_legal\_moves}、\texttt{\_play}、
+          \texttt{\_board\_to\_bitboards}；
+    \item \texttt{AIPlayer}：保存颜色、搜索深度、置换表、时间控制和当前最优步；
+    \item 搜索函数：\texttt{\_root\_search} 与 \texttt{\_pvs}；
+    \item 评估与排序函数：\texttt{\_evaluate}、\texttt{\_rank\_moves}、\texttt{\_corner\_risk}、
+          \texttt{\_frontier\_balance}。
+\end{itemize}
+
+完整源码见附录。正文中只保留关键片段，以便突出实现思路。
+
+\section{实验结果}
+
+使用平台提供的初级、中级和高级机器人进行先手、后手共六组测试。根据重新测试后保存的截图结果，
+当前程序六局均获胜，且在多个对局中保持了明显的终局子数优势。
+
+\begin{table}[H]
+    \centering
+    \caption{对战结果汇总}
+    \begin{tabular}{lccc}
+        \toprule
+        对手难度与执棋 & 用时 & 结果 & 领先棋子数 \\
+        \midrule
+        初级机器人，执黑 & 71 s & 黑棋获胜 & 60 \\
+        初级机器人，执白 & 66 s & 白棋获胜 & 50 \\
+        中级机器人，执黑 & 100 s & 黑棋获胜 & 34 \\
+        中级机器人，执白 & 85 s & 白棋获胜 & 32 \\
+        高级机器人，执黑 & 92 s & 黑棋获胜 & 44 \\
+        高级机器人，执白 & 80 s & 白棋获胜 & 59 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    \subfigure[初级，执黑]{\includegraphics[width=0.48\textwidth]{easy_black}}
+    \subfigure[初级，执白]{\includegraphics[width=0.48\textwidth]{easy_white}}
+    \caption{初级机器人对战结果}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \subfigure[中级，执黑]{\includegraphics[width=0.48\textwidth]{medium_black}}
+    \subfigure[中级，执白]{\includegraphics[width=0.48\textwidth]{medium_white}}
+    \caption{中级机器人对战结果}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \subfigure[高级，执黑]{\includegraphics[width=0.48\textwidth]{hard_black}}
+    \subfigure[高级，执白]{\includegraphics[width=0.48\textwidth]{hard_white}}
+    \caption{高级机器人对战结果}
+\end{figure}
+
+从结果看，程序不仅能够击败不同难度的机器人，而且先手和后手均有稳定表现。中级机器人两局的领先子数
+相对更接近，说明其中盘对抗对搜索排序和局面评估提出了更高要求；高级机器人两局则显示程序在残局阶段
+仍能保持较强的收束能力，尤其执白测试中取得了较大的最终优势。整体而言，角点控制、行动力压制和残局精算
+仍是本版本获胜的主要来源。
+
+\section{总结}
+
+本项目最终实现了一个面向黑白棋的确定性搜索智能体。相比最直接的随机 MCTS，当前版本将主要计算量用于
+更可控的 PVS 博弈树搜索，并用位棋盘降低了合法步生成与局面更新的常数开销。置换表、动作排序和动态时间预算
+共同保证了搜索深度；分阶段评估函数则把黑白棋中重要的棋理特征显式引入程序。
+
+从实验结果看，当前程序达到了预期目标，能够在初级、中级、高级机器人测试中全部获胜。实现中最关键的经验是：
+黑白棋不能只追求当前翻子数，前中期更重要的是角点、行动力和避免送角；到残局阶段，静态评估的可信度下降，
+应尽可能切换到精确搜索。
+
+仍可继续改进的方向包括：
+\begin{itemize}
+    \item 使用 Zobrist 哈希压缩置换表键，减少 Python 元组键的哈希开销；
+    \item 加入更准确的稳定子识别，而不是只用边线数量近似稳定性；
+    \item 建立开局库，减少前几步搜索的不确定性；
+    \item 通过自对弈或网格搜索自动调整评估函数权重，减少人工调参偏差。
+\end{itemize}
+
+总体而言，本次实验使我更清楚地理解了博弈程序中算法思想和工程效率之间的关系：同样是向前搜索，
+只有当棋盘表示、走法排序、剪枝策略和时间控制共同配合时，算法才能在平台限制下稳定转化为实际棋力。
