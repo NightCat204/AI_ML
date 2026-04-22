@@ -1,0 +1,424 @@
+\documentclass[UTF8,a4paper,11pt]{ctexart}
+
+% ---------- 页面与基础宏包 ----------
+\usepackage[margin=2.3cm]{geometry}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{subcaption}
+\usepackage{amsmath,amssymb}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{caption}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    urlcolor=blue!60!black,
+}
+
+% ---------- 代码样式：Python ----------
+\definecolor{codebg}{RGB}{248,248,248}
+\definecolor{codekw}{RGB}{0,0,180}
+\definecolor{codestr}{RGB}{163,21,21}
+\definecolor{codecom}{RGB}{0,128,0}
+\definecolor{codenum}{RGB}{128,128,128}
+
+\lstdefinestyle{pystyle}{
+    language=Python,
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{codekw}\bfseries,
+    stringstyle=\color{codestr},
+    commentstyle=\color{codecom}\itshape,
+    numberstyle=\tiny\color{codenum},
+    backgroundcolor=\color{codebg},
+    numbers=left,
+    numbersep=6pt,
+    frame=single,
+    rulecolor=\color{black!30},
+    framesep=3pt,
+    breaklines=true,
+    breakatwhitespace=false,
+    showstringspaces=false,
+    tabsize=4,
+    captionpos=b,
+    columns=fullflexible,
+    keepspaces=true,
+    extendedchars=true,
+    inputencoding=utf8,
+    literate=%
+      {-}{{-}}1
+}
+
+% 伪代码样式
+\lstdefinestyle{pseudostyle}{
+    basicstyle=\ttfamily\small,
+    backgroundcolor=\color{codebg},
+    frame=single,
+    rulecolor=\color{black!30},
+    framesep=3pt,
+    breaklines=true,
+    columns=fullflexible,
+    keepspaces=true,
+    showstringspaces=false,
+    escapeinside={(*@}{@*)},
+    extendedchars=true,
+    inputencoding=utf8,
+}
+
+% ---------- 标题信息 ----------
+\title{\textbf{程序报告：黑白棋（Reversi）MCTS 智能体}}
+\author{安博源\quad 学号：3230105806}
+\date{}
+
+\begin{document}
+\maketitle
+
+%===================================================================
+\section{问题重述}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.32\linewidth]{media/media/image1.png}
+\end{figure}
+
+如上图所示，本实验旨在基于蒙特卡洛树搜索（MCTS）算法，
+这道题的主干可以概括为：给定一个黑白棋中途局面，让程序代替玩家完成下一步落子决策。
+程序面对的是标准 $8\times 8$ 棋盘，需要遵守黑白棋的合法落子与翻转规则；
+如果当前存在可下位置，就要在这些合法步中选出质量最高的一步，
+如果无棋可下，则需要正确返回空步。
+
+因此，真正要解决的核心不是把规则再实现一遍，而是在有限时间内做好"搜什么、怎么看、怎么选"。
+具体到实验要求，就是在 \texttt{AIPlayer} 的 \texttt{get\_move(board)} 中，
+根据当前棋盘状态快速分析局面，输出一个合法坐标，
+并让智能体在与不同等级基准机器人的对战中尽量取得更好的胜负结果和终局优势。
+
+%===================================================================
+\section{设计思想}
+
+我的实现围绕 MCTS 的四大步骤（选择、扩展、模拟、回传）展开，
+前后共经历了三个版本：从标准 MCTS 出发，
+逐步用启发式知识替换其中"随机"和"盲目"的部分，
+最终得到一版以位棋盘为核心、搜索更加高效稳定的智能体。
+
+%-----------------------------------------------
+\subsection{基础实现：标准 MCTS 黑白棋智能体}
+
+第一版完全按照 MCTS 的教材流程实现。
+对于当前棋局，先建立根节点，然后在时间预算内反复执行"选择 $\to$ 扩展 $\to$ 模拟 $\to$ 回传"四步，
+最后选择根节点访问次数最多的动作作为落子。
+选择阶段采用经典的 UCT 公式，模拟阶段采用随机 rollout，
+回传阶段按 $\pm 1$ 回传胜负。
+
+\begin{lstlisting}[style=pseudostyle,caption={基础版 MCTS 伪代码}]
+函数 GET_MOVE(board):
+    legal <- 当前合法动作
+    若 legal 为空: 返回 None
+    root <- 当前局面对应的根节点
+    在时间限制内重复:
+        node   <- TREE_POLICY(root)      # UCT 选择 + 扩展
+        reward <- DEFAULT_POLICY(node)   # 随机 rollout
+        BACKUP(node, reward)
+    返回根节点访问次数最多的动作
+\end{lstlisting}
+
+实际测试发现：基础版可以战胜初级机器人，但净胜子数较少；
+面对中高级机器人时赢面不稳定，随机性很大。我分析原因有三点：
+\begin{itemize}[leftmargin=1.5em,itemsep=1pt]
+    \item 随机 rollout 噪声极大，在黑白棋这种"一步决定角的归属"的棋里常常误导统计；
+    \item UCT 在给定时间内只能扩展出几千个节点，对中盘复杂局面覆盖度不够；
+    \item 对黑白棋的结构知识（角、C/X 位、行动力、稳定性）没有任何利用。
+\end{itemize}
+
+%-----------------------------------------------
+\subsection{第一轮优化：启发式评估、动作排序与残局精算}
+
+针对上面的问题，我保留 MCTS 的四步骨架，但把关键环节替换为启发式版本：
+\begin{itemize}[leftmargin=1.5em,itemsep=1pt]
+    \item \textbf{评估替代 rollout}：模拟阶段不再做完全随机的 rollout，
+          而是用一个静态评估函数 \texttt{EVALUATE} 综合角 / 邻角 / 行动力 /
+          位置权重 / 前沿子 / 棋子差来估计局面；
+    \item \textbf{动作排序}：对每一步按"是否送角""是否压缩对手行动力""位置权重"打分排序，
+          让 MCTS 的扩展优先走更有潜力的分支；
+    \item \textbf{残局精算}：对空位较少的局面直接切到 Alpha-Beta 搜索到终局，不再 rollout。
+\end{itemize}
+
+\begin{lstlisting}[style=pseudostyle,caption={第一轮优化伪代码}]
+函数 EVALUATE(board, color):
+    计算角点、危险位、行动力、前沿子、棋子差、位置权重等特征
+    根据当前阶段加权求和
+    返回评估值
+
+函数 ORDER_ACTIONS(board, actions):
+    对每个动作:
+        执行动作并用 EVALUATE 估值
+        若会送角给对手则降低分数
+        若能压缩对手行动力则提高分数
+    按分数排序后返回
+
+函数 SEARCH_ENDGAME(board):
+    当空位足够少时，用 Alpha-Beta 搜索至终局
+    返回最优动作
+\end{lstlisting}
+
+这一版对初级和高级机器人胜率大幅提升，但仍有两个问题：
+\textbf{其一}，MCTS 维护 UCT 节点的成本很高，模拟里频繁复制棋盘列表非常慢，
+加上启发式评估和残局搜索同时参与，一局对弈常常超过半小时；
+\textbf{其二}，MCTS 的统计量更新天然慢，面对某些风格鲜明的对手（实测是中级机器人）
+出现了"前中盘优势、后期连续翻车"的反常现象。
+
+%-----------------------------------------------
+\subsection{最终优化：位棋盘 + 迭代加深 PVS + 动态残局求解}
+
+继续追问"MCTS 框架在这里到底还剩下什么"，我发现：
+当 rollout 被评估替换、UCT 被"按评估选子节点"替换之后，
+整棵树其实已经退化成"对每个局面按分数挑最好分支"的递归搜索。
+这个退化的极限等价形式就是 \textbf{Negamax + Alpha-Beta}——
+可以把它视为"所有节点一次性扩展完、rollout 为静态评估、selection 为评分最大"的 MCTS。
+基于这个观察，最终版整体改为位棋盘 + 迭代加深 Alpha-Beta，
+保留 MCTS 之前调好的评估函数、动作排序与残局求解，
+并叠加若干工程优化：
+
+\begin{enumerate}[leftmargin=1.5em,itemsep=2pt]
+    \item \textbf{位棋盘表示}。用两个 64 位整数 \texttt{my}、\texttt{opp} 分别存黑 / 白棋子，
+          合法着法 \texttt{\_get\_moves}（Dumb7Fill）、翻转 \texttt{\_do\_move}、
+          子数统计 \texttt{\_popcount} 全部用位运算完成，常数相比列表棋盘低一个数量级。
+    \item \textbf{迭代加深 + PVS（NegaScout）}。
+          外层按深度从 $1$ 逐步加深到 \texttt{max\_depth}；
+          内层对第一个着法按完整窗口搜索，
+          其余着法先用零窗口 \texttt{[-$\alpha$-1, -$\alpha$]} 试探，
+          仅当命中 $(\alpha, \beta)$ 时再以完整窗口重搜。
+          相对朴素 Alpha-Beta 能再省下可观的节点。
+    \item \textbf{置换表（TT）}。键为 \texttt{(my, opp, passed)}，
+          值为 \texttt{(depth, flag, value, best\_move)}，
+          其中 \texttt{flag}: $0$ 精确 / $1$ 下界 / $2$ 上界。
+          TT 不仅用于截断子树，命中时保存的 \texttt{best\_move}
+          会作为下一次迭代加深的首选着法（PV 排序）。
+    \item \textbf{残局精确求解}。末期把"到深度 0 返回静态评估"关掉，
+          一直递归到双方均无合法步，返回真实胜负分
+          $\pm 10^{6} + \text{净胜子}$（\texttt{\_terminal\_score}），
+          残局完全精确。
+    \item \textbf{角点抢答}。决策开始时若任一合法步为角，
+          直接取评分最高的角着法返回，省去搜索时间。
+\end{enumerate}
+
+\begin{lstlisting}[style=pseudostyle,caption={最终版伪代码（对应 \texttt{main.py}）}]
+函数 GET_MOVE(board):
+    my, opp <- BOARD_TO_BITS(board)
+    legal   <- GET_MOVES(my, opp)
+    若 legal 为空:           返回 None
+    若 legal 只有一个着法:   直接返回
+    若 legal 包含角点:       按评分挑最好的角返回     # 角点抢答
+    empties <- 空位数
+    solve_threshold <- SOLVE_THRESHOLD(empties, legal_count)
+    deadline <- now + TIME_BUDGET(empties)
+    best    <- ORDER_MOVES(...)[0]
+    对 depth = 1, 2, ..., DEPTH_LIMIT:
+        move <- SEARCH_ROOT(my, opp, depth, best)    # PVS 根搜索
+        若搜索完成: best <- move
+        若已达残局深度: break
+    (超时由 SearchTimeout 捕获，回退上一完整深度)
+    返回 BIT_TO_COORD(best)
+
+函数 SEARCH(my, opp, depth, alpha, beta, passed):
+    查 TT：命中且深度足够则按 flag 更新窗口或返回
+    legal <- GET_MOVES(my, opp)
+    若 legal 为空:
+        若 passed: 返回 TERMINAL_SCORE
+        否则交换双方，递归 SEARCH(..., passed=True)
+    empties <- 空位数;  solve_threshold <- SOLVE_THRESHOLD(empties, |legal|)
+    若 depth <= 0 且 empties > solve_threshold:
+        返回 EVALUATE(my, opp, legal)
+    对 ORDER_MOVES(legal, tt_move) 中的每个 move:
+        (new_my, new_opp) <- DO_MOVE(my, opp, move)
+        若为首着: score <- 完整窗口  [-beta, -alpha]
+        否则     : score <- 零窗口   [-alpha-1, -alpha]
+                  若 alpha < score < beta: 再以 [-beta, -score] 重搜
+        更新 best_score / alpha；若 alpha >= beta 则剪枝
+    写入 TT (flag: 精确 / 下界 / 上界)
+    返回 best_score
+
+函数 EVALUATE(my, opp):
+    计算行动力、角、邻角压力、位置权重、前沿子、边、棋子差、奇偶性
+    按阶段（开局 / 中盘 / 残局）加权求和
+    返回评估值
+\end{lstlisting}
+
+\subsubsection*{走法排序（\texttt{\_order\_moves}）}
+
+Alpha-Beta 的剪枝效率强依赖排序。打分规则如下：
+\begin{itemize}[leftmargin=1.5em,itemsep=1pt]
+    \item 位置权重基础分：\texttt{POSITION\_WEIGHTS[idx] * 8}；
+    \item 角 \texttt{CORNERS}：\texttt{+200\,000}；
+    \item 置换表推荐 \texttt{tt\_move}：\texttt{+100\,000}；
+    \item X 位 \texttt{-6\,000}；C 位 \texttt{-2\,500}；
+    \item 落子后对手合法步数 $\times\, 80$（扣分）；
+    \item 本步翻转数 $\times\, 8$（小幅正向，但故意压低，避免前中期贪吃）。
+\end{itemize}
+
+\subsubsection*{分阶段评估（\texttt{\_evaluate}）}
+
+\begin{table}[H]
+\centering
+\caption{评估函数分阶段权重}
+\begin{tabular}{lccc}
+\toprule
+特征 & 开局 $(>40)$ & 中盘 $(17$--$40)$ & 残局 $(\le 16)$ \\
+\midrule
+行动力 mobility          & 10 &  8 &  5 \\
+角 corners               & 20 & 30 & 35 \\
+角邻压力 corner\_pressure& 12 & 10 &  4 \\
+位置权重 positional      &  4 &  3 &  2 \\
+前沿子 frontier          &  3 &  3 &  4 \\
+边 edges                 &  1 &  2 &  4 \\
+棋子差 disc\_diff        &  — &  2 & 12 \\
+奇偶性 parity            &  — &  — &  8 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection*{动态时间与残局阈值}
+
+\texttt{\_time\_budget} 与 \texttt{\_solve\_threshold} 按剩余空位分段调度：
+
+\begin{table}[H]
+\centering
+\caption{动态时间预算与残局求解阈值}
+\begin{tabular}{lccc}
+\toprule
+剩余空位 \texttt{empties} & 时间预算 (s) & 残局阈值 & 深度上限 \\
+\midrule
+$>50$（开局）         & 1.2 & — & \texttt{max\_depth}$=12$ \\
+$41$--$50$            & 2.2 & — & 12 \\
+$29$--$40$            & 3.5 & — & 12 \\
+$17$--$28$（中盘）    & 4.2 & — & 12 \\
+$11$--$16$（中后盘）  & 4.8 & 12 & 12 \\
+$\le 10$（残局）      & 8.0 & 12 & empties \\
+\midrule
+\multicolumn{4}{l}{\footnotesize 追加规则：\texttt{empties} $\le 14$ 且合法步数 $\le 6$ 时残局阈值抬到 $14$，提前进入精确求解。} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection*{关键超参数}
+
+\begin{itemize}[leftmargin=1.5em,itemsep=1pt]
+    \item \texttt{max\_depth = 12}（非残局段深度硬上限）；
+    \item \texttt{solve\_threshold}：默认 $12$，贴近残局且分支收窄（$\text{empties} \le 14$ 且 $|\text{legal}| \le 6$）时抬到 $14$；
+    \item 时间预算：从开局的 $1.2$\,s 单调增长到纯残局的 $8.0$\,s，保证中盘留足深度、残局留足精确求解空间。
+\end{itemize}
+
+这些参数是在对弈测试中逐步调整得到的：
+固定其余部分、只动一组参数，与初级 / 中级 / 高级机器人分别进行先后手对局，
+综合比较胜负、净胜子数和单局耗时；
+最终保留在"棋力、稳定性、总用时"之间达到较好平衡的一组。
+
+%===================================================================
+\section{代码内容}
+
+核心实现位于 \texttt{main.py}，包含位棋盘常量、合法步 / 翻转位运算函数、
+评估与排序辅助函数，以及 \texttt{AIPlayer} 类的迭代加深 PVS 搜索。全文如下：
+
+\lstinputlisting[style=pystyle,caption={\texttt{main.py} 完整代码}]{../main.py}
+
+%===================================================================
+\section{实验结果}\label{sec:exp}
+
+分别与初级、中级、高级机器人进行先手 / 后手对弈，结果如下。
+
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{media/media/image2.png}
+    \end{subfigure}\hfill
+    \begin{subfigure}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{media/media/image3.png}
+    \end{subfigure}
+    \caption{初级机器人：先手 / 后手对弈结果}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{media/media/image4.png}
+    \end{subfigure}\hfill
+    \begin{subfigure}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{media/media/image5.png}
+    \end{subfigure}
+    \caption{中级机器人：先手 / 后手对弈结果}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{media/media/image6.png}
+    \end{subfigure}\hfill
+    \begin{subfigure}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{media/media/image7.png}
+    \end{subfigure}
+    \caption{高级机器人：先手 / 后手对弈结果}
+\end{figure}
+
+从实验结果可见，最终版本在所有难度 $\times$ 先后手的组合下均稳定取胜，
+多数局次保持较大的净胜子优势。
+
+%===================================================================
+\section{总结}
+
+这次实验让我从"标准 MCTS"出发，一路把随机 rollout 换成静态评估、
+把 UCT 选择退化为 $\alpha$-$\beta$ 剪枝，
+最终得到一个工程化程度更高、稳定性也更好的搜索智能体。
+一开始我以为只要把 MCTS 的四步写对、再加上一点启发式就够了；
+直到真正去分析"每 $1$ 秒内到底跑了多少次有效模拟"，
+才理解 MCTS 在黑白棋这种评估函数相对成熟的问题上并不是最省算力的选择——
+真正有效的 MCTS 变体最后几乎都变成了 Negamax + 评估，
+区别只在"搜索树的展开策略"。
+这次手把手走完这条退化路径，对我理解博弈搜索的帮助很大。
+
+实现层面上，下面这几件事对最终棋力影响最大，且很多都是代码上看着小、实际提升很大的改动：
+\begin{itemize}[leftmargin=1.5em,itemsep=2pt]
+    \item \textbf{位棋盘压低了基本常数}。合法步和翻转全部用位运算之后，
+          同样深度的搜索速度相比列表棋盘约快一个数量级。
+          没有这一步，后面所有优化都撑不开搜索深度。
+    \item \textbf{PVS（NegaScout）对黑白棋特别有效}。
+          因为黑白棋里大部分非主变着法的评分会迅速掉下来，
+          零窗口探测命中率很高，重搜代价相对很小；
+          我粗测同样 $4$\,s 预算下，PVS 比朴素 $\alpha$-$\beta$ 多搜 $1$--$2$ 层。
+    \item \textbf{置换表既剪枝又排序}。
+          命中 TT 时保存的 \texttt{best\_move} 作为下一层迭代加深的首选着法，
+          PV 基本能一次性跑通，剪枝效率远比单纯"精确/下界/上界"命中更高。
+    \item \textbf{动态时间预算比固定每步 1\,s 合理得多}。
+          开局走平凡位置只花 $1.2$\,s，省下的预算给残局，
+          让残局精确求解阈值可以放到 $12$--$14$，决定性收益来自末期。
+    \item \textbf{角点抢答是"规则级"优化}。
+          出现可下角时几乎不存在需要放弃它的局面，
+          直接返回省下的那几秒又可以变成后续几步的深度。
+    \item \textbf{送角惩罚要"极端"}。
+          X 位 $-6\,000$、C 位 $-2\,500$ 看起来很夸张，
+          但正是这种量级才能把"送角"稳稳地压到排序末尾、让 $\alpha$-$\beta$ 早早剪枝。
+\end{itemize}
+
+仍有可以继续做的方向：
+(1) 用 \textbf{Zobrist 哈希}替代当前 \texttt{(my, opp, passed)} 三元组作为 TT 键，
+把键长从 $\sim 150$ 位压到 $64$ 位，\texttt{dict} 命中检查更快；
+(2) 评估函数里的"稳定性"目前只是用边格计数近似，
+可以引入真正的稳定棋子传播算法，进一步压缩启发式噪声；
+(3) 前若干步换成 \textbf{开局库}，把搜索时间让给更关键的中后盘；
+(4) 走法排序和评估权重还有调参空间，但手调接近边际了，
+更合理的方式是构造自对弈数据集，让权重由数据拟合。
+
+总的来说，这次实验让我完整经历了"按教材照抄 MCTS $\to$ 发现瓶颈 $\to$ 把 MCTS 的每一步替换掉 $\to$ 在工程细节里打磨"的完整过程。
+真正的收获是：博弈搜索的胜负常常不在"想法新不新"，
+而在"想法能不能被快到极致地执行"——
+位棋盘、置换表、PVS、走法排序、动态时间分配这些看起来偏工程的东西，
+恰恰是把算法从"能跑"推到"能赢"的决定性因素。
+
+\end{document}
