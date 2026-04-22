@@ -6,11 +6,11 @@ import torch.nn as nn
 from torchvision import transforms, models
 
 
-MODEL18_PATH = "./results/resnet18_final_full.pth"
-MODEL34_PATH = "./results/resnet34_final_full.pth"
-IMAGE_SIZE = 224
+PATH_NET18 = "./results/r18_gc26.pth"
+PATH_NET34 = "./results/r34_gc26.pth"
+IMG_DIM = 224
 
-inverted = {
+idx_to_label = {
     0: 'Plastic Bottle',
     1: 'Hats',
     2: 'Newspaper',
@@ -39,54 +39,54 @@ inverted = {
     25: 'Banana Peel'
 }
 
-_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-_model18 = None
-_model34 = None
+_hw = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+_net18 = None
+_net34 = None
 
-_transform = transforms.Compose([
+_img_pipeline = transforms.Compose([
     transforms.ToPILImage(),
-    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+    transforms.Resize((IMG_DIM, IMG_DIM)),
     transforms.ToTensor(),
     transforms.Normalize([0.485, 0.456, 0.406],
                          [0.229, 0.224, 0.225]),
 ])
 
 
-def _build_resnet18():
-    model = models.resnet18(pretrained=False)
-    model.fc = nn.Linear(model.fc.in_features, 26)
-    return model
+def _make_net18():
+    net = models.resnet18(pretrained=False)
+    net.fc = nn.Linear(net.fc.in_features, 26)
+    return net
 
 
-def _build_resnet34():
-    model = models.resnet34(pretrained=False)
-    model.fc = nn.Linear(model.fc.in_features, 26)
-    return model
+def _make_net34():
+    net = models.resnet34(pretrained=False)
+    net.fc = nn.Linear(net.fc.in_features, 26)
+    return net
 
 
-def _load_once():
-    global _model18, _model34
+def _ensure_models():
+    global _net18, _net34
 
-    if _model18 is not None and _model34 is not None:
+    if _net18 is not None and _net34 is not None:
         return
 
-    model18 = _build_resnet18()
-    state18 = torch.load(MODEL18_PATH, map_location=_device)
-    model18.load_state_dict(state18)
-    model18.to(_device)
-    model18.eval()
+    n18 = _make_net18()
+    w18 = torch.load(PATH_NET18, map_location=_hw)
+    n18.load_state_dict(w18)
+    n18.to(_hw)
+    n18.eval()
 
-    model34 = _build_resnet34()
-    state34 = torch.load(MODEL34_PATH, map_location=_device)
-    model34.load_state_dict(state34)
-    model34.to(_device)
-    model34.eval()
+    n34 = _make_net34()
+    w34 = torch.load(PATH_NET34, map_location=_hw)
+    n34.load_state_dict(w34)
+    n34.to(_hw)
+    n34.eval()
 
-    _model18 = model18
-    _model34 = model34
+    _net18 = n18
+    _net34 = n34
 
 
-def _prepare(image):
+def _preprocess(image):
     if not isinstance(image, np.ndarray):
         image = np.array(image)
 
@@ -101,23 +101,23 @@ def _prepare(image):
     if image.dtype != np.uint8:
         image = np.clip(image, 0, 255).astype(np.uint8)
 
-    image = cv2.resize(image, (IMAGE_SIZE, IMAGE_SIZE))
+    image = cv2.resize(image, (IMG_DIM, IMG_DIM))
     return image
 
 
 def predict(image):
-    _load_once()
-    image = _prepare(image)
+    _ensure_models()
+    image = _preprocess(image)
 
-    image_flip = np.ascontiguousarray(image[:, ::-1, :])
+    img_flipped = np.ascontiguousarray(image[:, ::-1, :])
 
-    tensor1 = _transform(image).unsqueeze(0).to(_device)
-    tensor2 = _transform(image_flip).unsqueeze(0).to(_device)
+    t_orig = _img_pipeline(image).unsqueeze(0).to(_hw)
+    t_flip = _img_pipeline(img_flipped).unsqueeze(0).to(_hw)
 
     with torch.no_grad():
-        logits18 = (_model18(tensor1) + _model18(tensor2)) / 2.0
-        logits34 = (_model34(tensor1) + _model34(tensor2)) / 2.0
-        logits = (logits18 + logits34) / 2.0
-        pred_idx = int(torch.argmax(logits, dim=1).item())
+        logits_18 = (_net18(t_orig) + _net18(t_flip)) / 2.0
+        logits_34 = (_net34(t_orig) + _net34(t_flip)) / 2.0
+        combined = (logits_18 + logits_34) / 2.0
+        pred_idx = int(torch.argmax(combined, dim=1).item())
 
-    return inverted[pred_idx]
+    return idx_to_label[pred_idx]
