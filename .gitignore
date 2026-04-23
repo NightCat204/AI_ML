@@ -89,9 +89,9 @@ predict_A/test/
 predict_A/Attn/train_data.npy
 
 # 训练产物（可通过 train.py 重新生成）
-predict_A/MLP/results/*.pt
-predict_A/Attn/results/*.pth
-predict_A/Attn/results/tb_results/*.pth
+# predict_A/MLP/results/*.pt
+# predict_A/Attn/results/*.pth
+# predict_A/Attn/results/tb_results/*.pth
 
 # 平台自动生成文件
 predict_A/MLP/main.py
@@ -110,7 +110,7 @@ predict_A/.git/
 Classification/datasets/
 
 # ResNet 训练产物（体积大，可通过训练脚本重新生成）
-Classification/resnet/results/*.pth
+# Classification/resnet/results/*.pth
 
 # 原始 MindSpore 方案（已弃用，保留代码但排除大文件）
 Classification/default/src_mindspore/mobilenetv2-200_1067_cpu_gpu.ckpt
