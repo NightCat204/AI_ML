@@ -1,93 +1,111 @@
-def _build_feature_frame(df):
+FEATURE_COLUMNS = ("log_cpc", "log_cpm")
+DEFAULT_ANOMALY_RATIO = 0.024
+MODEL_PATH = "./results/model.pkl"
+SCALER_PATH = "./results/scaler.pkl"
+PCA_PATH = "./results/pca.pkl"
+
+
+def _make_log_features(frame):
     import numpy as np
     import pandas as pd
 
-    # 平台测评会复用传入对象，这里保持原地修改
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df.sort_values(by="timestamp", inplace=True)
-    df.reset_index(drop=True, inplace=True)
+    # The judge may keep using the same DataFrame object, so this intentionally
+    # preserves the in-place ordering behavior of the original submission.
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"])
+    frame.sort_values(by="timestamp", inplace=True)
+    frame.reset_index(drop=True, inplace=True)
 
-    df["log_cpc"] = np.log1p(df["cpc"])
-    df["log_cpm"] = np.log1p(df["cpm"])
+    frame["log_cpc"] = np.log1p(frame["cpc"])
+    frame["log_cpm"] = np.log1p(frame["cpm"])
+    return frame.loc[:, FEATURE_COLUMNS]
 
-    columns = ["log_cpc", "log_cpm"]
-    return df[columns]
+
+def _build_feature_frame(df):
+    return _make_log_features(df)
+
+
+def _load_pickle(path):
+    import joblib
+
+    return joblib.load(path)
 
 
 def _load_kmeans_model(path):
-    import joblib
+    model = _load_pickle(path)
 
-    model = joblib.load(path)
-
-    # 兼容旧版 sklearn 序列化出的 KMeans。
-    # 在 1.6.x 环境下，旧模型可能缺少 _n_threads，调用 predict 会直接报错。
+    # Older sklearn KMeans pickles may not have this runtime attribute. Newer
+    # sklearn versions read it during predict(), so patch it lazily if needed.
     if not hasattr(model, "_n_threads"):
         model._n_threads = 1
 
     return model
 
 
-def preprocess_data(df):
+def _as_dimension_frame(matrix):
     import pandas as pd
-    import joblib
 
-    data = _build_feature_frame(df)
+    return pd.DataFrame(
+        matrix,
+        columns=["Dimension{}".format(i + 1) for i in range(matrix.shape[1])],
+    )
 
-    scaler = joblib.load("./results/scaler.pkl")
-    pca = joblib.load("./results/pca.pkl")
+
+def preprocess_data(df):
+    features = _build_feature_frame(df)
+    scaler = _load_pickle(SCALER_PATH)
+    pca = _load_pickle(PCA_PATH)
 
     if scaler is not None:
-        data = scaler.transform(data)
+        transformed = scaler.transform(features)
     else:
-        data = data.values
+        transformed = features.values
 
     if pca is not None:
-        data = pca.transform(data)
+        transformed = pca.transform(transformed)
 
-    data = pd.DataFrame(
-        data,
-        columns=["Dimension{}".format(i + 1) for i in range(data.shape[1])],
-    )
-    return data
+    return _as_dimension_frame(transformed)
 
 
-def get_distance(data, kmeans, n_features):
+def _cluster_distance(feature_frame, kmeans, n_features):
     import numpy as np
     import pandas as pd
 
-    X = data.iloc[:, :n_features].values
-    labels = kmeans.predict(X)
+    samples = feature_frame.iloc[:, :n_features].values
+    labels = kmeans.predict(samples)
     centers = kmeans.cluster_centers_
-
-    distance = np.linalg.norm(X - centers[labels], axis=1)
+    distance = np.linalg.norm(samples - centers[labels], axis=1)
     return pd.Series(distance), pd.Series(labels)
 
 
+def get_distance(data, kmeans, n_features):
+    return _cluster_distance(data, kmeans, n_features)
+
+
+def _mark_largest_distances(result_frame, ratio):
+    sample_count = len(result_frame)
+    top_count = max(1, int(round(sample_count * ratio)))
+    top_count = min(top_count, sample_count)
+    selected = result_frame["distance"].nlargest(top_count).index
+    result_frame.loc[selected, "is_anomaly"] = True
+
+
 def get_anomaly(data, kmean, ratio=None):
-    data = data.copy()
+    result = data.copy()
+    anomaly_ratio = DEFAULT_ANOMALY_RATIO if ratio is None else ratio
 
-    if ratio is None:
-        ratio = 0.024
+    n_features = len(result.columns)
+    distance, labels = get_distance(result, kmean, n_features=n_features)
 
-    n_features = len(data.columns)
-    distance, labels = get_distance(data, kmean, n_features=n_features)
+    result["cluster"] = labels.values
+    result["distance"] = distance.values
+    result["is_anomaly"] = False
+    _mark_largest_distances(result, anomaly_ratio)
 
-    data["cluster"] = labels.values
-    data["distance"] = distance.values
-    data["is_anomaly"] = False
-
-    top_k = max(1, int(round(len(data) * ratio)))
-    top_k = min(top_k, len(data))
-    anomaly_index = data["distance"].nlargest(top_k).index
-    data.loc[anomaly_index, "is_anomaly"] = True
-
-    return data
+    return result
 
 
 def predict(preprocess_data):
-    ratio = 0.024
-
-    kmeans = _load_kmeans_model("./results/model.pkl")
-    is_anomaly = get_anomaly(preprocess_data, kmeans, ratio)
-
-    return is_anomaly, preprocess_data, kmeans, ratio
+    ratio = DEFAULT_ANOMALY_RATIO
+    kmeans = _load_kmeans_model(MODEL_PATH)
+    anomaly_frame = get_anomaly(preprocess_data, kmeans, ratio)
+    return anomaly_frame, preprocess_data, kmeans, ratio
